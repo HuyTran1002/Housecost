@@ -937,8 +937,13 @@ export function subscribeToRealtimeSync(onDataUpdated: () => void): () => void {
               // Nếu máy khác vừa bấm nút Khôi Phục (mốc xóa trên Cloud không còn) -> Máy này tự gỡ mốc xóa Local & Khôi phục dữ liệu theo!
               const currentLocalPending = getPendingDeletions();
               let isRestoredByOtherDevice = false;
+              const nowMs = Date.now();
 
               currentLocalPending.forEach((p) => {
+                const dTime = parseDeletedAt(p.deletedAt);
+                const isFreshLocal = dTime > 0 && nowMs - dTime < 8000;
+                if (isFreshLocal) return; // Mốc xóa vừa tạo ở local 8s gần đây -> Đang đẩy Cloud, KHÔNG GỠ!
+
                 const isTenantMatch = p.id === tId || (p.type === 'tenant' && (p.id === tId || p.tenantName?.trim().toLowerCase() === tName));
                 const isBillMatch = (data.combinedHistory || []).some((c: any) => c.id === p.id) || (data.singleHistory || []).some((s: any) => s.id === p.id);
 
