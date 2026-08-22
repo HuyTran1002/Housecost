@@ -919,9 +919,10 @@ export function subscribeToRealtimeSync(onDataUpdated: () => void): () => void {
               const tId = data.tenant.id;
               const tName = (data.tenant.name || '').trim().toLowerCase();
 
-              const cloudPendingDeletions = data.pendingDeletions || [];
+              const cloudPendingDeletions: any[] = data.pendingDeletions || [];
+              const cloudPendingIds = new Set(cloudPendingDeletions.map((cp) => cp.id));
 
-              // Tự động nạp hợp nhất thẻ xóa từ Cloud vào Local (bảo toàn mốc thời gian xóa gốc)
+              // 1. Tự động nạp hợp nhất thẻ xóa từ Cloud vào Local (bảo toàn mốc thời gian xóa gốc)
               if (Array.isArray(cloudPendingDeletions) && cloudPendingDeletions.length > 0) {
                 cloudPendingDeletions.forEach((cp: any) => {
                   if (cp.id && cp.type) {
@@ -931,6 +932,22 @@ export function subscribeToRealtimeSync(onDataUpdated: () => void): () => void {
                   }
                 });
               }
+
+              // 2. ĐỒNG BỘ KHÔI PHỤC ĐA THIẾT BỊ REALTIME:
+              // Nếu máy khác vừa bấm nút Khôi Phục (mốc xóa trên Cloud không còn) -> Máy này tự gỡ mốc xóa Local & Khôi phục dữ liệu theo!
+              const currentLocalPending = getPendingDeletions();
+              let isRestoredByOtherDevice = false;
+
+              currentLocalPending.forEach((p) => {
+                const isTenantMatch = p.id === tId || (p.type === 'tenant' && (p.id === tId || p.tenantName?.trim().toLowerCase() === tName));
+                const isBillMatch = (data.combinedHistory || []).some((c: any) => c.id === p.id) || (data.singleHistory || []).some((s: any) => s.id === p.id);
+
+                if ((isTenantMatch || isBillMatch) && !cloudPendingIds.has(p.id)) {
+                  removePendingDeletion(p.id);
+                  removeDeletedBillId(p.id);
+                  isRestoredByOtherDevice = true;
+                }
+              });
 
               const latestLocalPending = getPendingDeletions().filter((p) => p.type === 'tenant');
               const latestPendingTenantIds = new Set(latestLocalPending.map((p) => p.id));
@@ -942,7 +959,7 @@ export function subscribeToRealtimeSync(onDataUpdated: () => void): () => void {
                 deleteTenant(tId);
                 updated = true;
               } else {
-                applyTenantSyncData(data as any, false);
+                applyTenantSyncData(data as any, isRestoredByOtherDevice);
                 updated = true;
               }
             }
