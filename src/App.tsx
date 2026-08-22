@@ -123,7 +123,7 @@ export function App() {
         <div className="app-header-title" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <Calculator color="#3b82f6" size={20} />
           <span>Tính Tiền Trọ</span>
-          <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(59,130,246,0.18)', color: '#60a5fa', fontWeight: 700 }}>v1.2</span>
+          <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(59,130,246,0.18)', color: '#60a5fa', fontWeight: 700 }}>v1.4</span>
         </div>
         <div className="app-header-actions">
           <button
