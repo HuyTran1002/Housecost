@@ -909,10 +909,6 @@ export function subscribeToRealtimeSync(onDataUpdated: () => void): () => void {
           if (isRestoringFromCloud) return; // Nếu đang trong quá trình Khôi Phục Từ Cloud, tạm bỏ qua snapshot Realtime
           let updated = false;
 
-          const pendingDeletions = getPendingDeletions();
-          const pendingTenantDeletions = pendingDeletions.filter((p) => p.type === 'tenant');
-          const pendingTenantIds = new Set(pendingTenantDeletions.map((p) => p.id));
-
           snap.docs.forEach((docSnap) => {
             const data = docSnap.data();
             if (data && data.tenant) {
@@ -961,7 +957,7 @@ export function subscribeToRealtimeSync(onDataUpdated: () => void): () => void {
               const isPendingDelete = latestPendingTenantIds.has(tId) || latestPendingTenantNames.has(tName);
               if (isPendingDelete) {
                 // Khách này đang trong trạng thái chờ xóa -> Đồng bộ gỡ ngay khỏi danh sách khách hoạt động ở local!
-                deleteTenant(tId);
+                deleteTenant(tId, false);
                 updated = true;
               } else {
                 applyTenantSyncData(data as any, isRestoredByOtherDevice);
@@ -1004,11 +1000,8 @@ export function subscribeToRealtimeSync(onDataUpdated: () => void): () => void {
               const data = change.doc.data();
               if (data && data.tenant && data.tenant.id) {
                 const tId = data.tenant.id;
-                const isPendingDelete = pendingTenantIds.has(tId);
-                if (!isPendingDelete) {
-                  deleteTenant(tId);
-                  updated = true;
-                }
+                deleteTenant(tId, false);
+                updated = true;
               }
             }
           });

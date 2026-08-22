@@ -845,16 +845,18 @@ export function saveTenant(tenant: Tenant): Tenant[] {
   return tenants;
 }
 
-export function deleteTenant(id: string): Tenant[] {
+export function deleteTenant(id: string, createPending: boolean = true): Tenant[] {
   const tenants = getTenants();
   const targetTenant = tenants.find((t) => t.id === id);
   const updated = tenants.filter((t) => t.id !== id);
   try {
     localStorage.setItem(TENANTS_KEY, JSON.stringify(updated));
-    const existingPending = getPendingDeletions().find((p) => p.id === id || (p.docId && p.docId.includes(id)));
-    const resolvedName = targetTenant?.name || existingPending?.tenantName;
-    const docId = targetTenant ? getTenantDocId(targetTenant) : (existingPending?.docId || id);
-    addPendingDeletion(id, 'tenant', resolvedName, docId);
+    if (createPending) {
+      const existingPending = getPendingDeletions().find((p) => p.id === id || (p.docId && p.docId.includes(id)));
+      const resolvedName = targetTenant?.name || existingPending?.tenantName;
+      const docId = targetTenant ? getTenantDocId(targetTenant) : (existingPending?.docId || id);
+      addPendingDeletion(id, 'tenant', resolvedName, docId);
+    }
   } catch (e) {
     console.error('Lỗi xóa khách thuê:', e);
   }
