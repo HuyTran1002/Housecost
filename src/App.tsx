@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { Settings, BillInput, CalculationResult, Tenant, CombinedBillRecord } from './types/calculator';
-import { getSettings, saveSettingsToStorage, getTenants } from './utils/calculator';
-import { checkAndAutoRestoreOnLaunch, checkAndAutoBackup24h } from './services/cloudSyncService';
+import { getSettings, saveSettingsToStorage, getTenants, getDraftReading, getDefaultBillingMonth } from './utils/calculator';
+import { checkAndAutoRestoreOnLaunch, checkAndAutoBackup24h, subscribeToRealtimeSync, syncSettingsToCloud, reconcileCloudWithLocal } from './services/cloudSyncService';
 import { MobileSimulator } from './components/MobileSimulator';
 import { BillReceiptModal } from './components/BillReceiptModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -37,17 +37,28 @@ export function App() {
     roomItems: { roomName: string; input: BillInput; result: CalculationResult }[];
   } | null>(null);
 
-  // Realtime re-sync tick cho điện thoại di động khi bật màn hình, mở lại app hoặc chuyển tab
-  const [timeTick, setTimeTick] = useState<number>(Date.now());
-
+  // ĐĂNG KÝ LẮNG NGHE ĐỒNG BỘ CLOUD THỜI GIAN THỰC (REALTIME ONSNAPSHOT)
   useEffect(() => {
-    setTenants(getTenants());
-  }, [showTenantManager]);
+    const unsubscribeSync = subscribeToRealtimeSync(() => {
+      const freshTenants = getTenants();
+      setTenants(freshTenants);
+      setSettings(getSettings());
+      setSelectedTenant((prev) => {
+        if (!prev) return null;
+        const matching = freshTenants.find((t) => t.id === prev.id || (t.name && prev.name && t.name.trim().toLowerCase() === prev.name.trim().toLowerCase()));
+        return matching || null;
+      });
+    });
+    return () => {
+      if (unsubscribeSync) unsubscribeSync();
+    };
+  }, []);
 
   // KIỂM TRA & TỰ ĐỘNG KHÔI PHỤC DỮ LIỆU TỪ CLOUD KHI ỨNG DỤNG KHỞI CHẠY (HOẶC VỪA CÀI LẠI APK)
   useEffect(() => {
     const unsubscribe = checkAndAutoRestoreOnLaunch(() => {
-      setTenants(getTenants());
+      const freshTenants = getTenants();
+      setTenants(freshTenants);
       setSettings(getSettings());
     });
     return () => {
@@ -58,7 +69,6 @@ export function App() {
   // TỰ ĐỘNG KIỂM TRA SAO LƯU 24H MỖI KHỞI CHẠY HOẶC MỞ LẠI APP TRÊN ĐIỆN THOẠI
   useEffect(() => {
     const handleMobileReSync = () => {
-      setTimeTick(Date.now());
       checkAndAutoBackup24h();
     };
     // Đã mở app ban đầu -> check ngay
@@ -74,9 +84,26 @@ export function App() {
     };
   }, []);
 
+  // TỰ ĐỘNG CHẠY ĐỐI SOÁT XÓA VĨNH VIỄN 5 PHÚT MỖI 30 GIÂY VỚI CLOUD FIRESTORE
+  useEffect(() => {
+    const runReconcile = async () => {
+      const res = await reconcileCloudWithLocal();
+      if (res && (res.cleanedTenantsCount > 0 || res.cleanedBillsCount > 0)) {
+        const freshTenants = getTenants();
+        setTenants(freshTenants);
+        setSettings(getSettings());
+        window.dispatchEvent(new Event('storage'));
+      }
+    };
+    runReconcile();
+    const interval = setInterval(runReconcile, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
   const handleSaveSettings = (newSettings: Settings) => {
     setSettings(newSettings);
     saveSettingsToStorage(newSettings);
+    syncSettingsToCloud(newSettings);
   };
 
   const handleSelectCombinedHistoryRecord = (record: CombinedBillRecord) => {
@@ -96,6 +123,7 @@ export function App() {
         <div className="app-header-title" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <Calculator color="#3b82f6" size={20} />
           <span>Tính Tiền Trọ</span>
+          <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(59,130,246,0.18)', color: '#60a5fa', fontWeight: 700 }}>v1.2</span>
         </div>
         <div className="app-header-actions">
           <button
@@ -128,7 +156,7 @@ export function App() {
         {selectedTenant ? (
           /* MÀN HÌNH TÍNH TIỀN THEO KHÁCH THUÊ (TUẦN TỰ 1 MÀN HÌNH ZERO-SCROLL) */
           <TenantCalculatorWizard
-            key={`${selectedTenant.id}-${timeTick}`}
+            key={selectedTenant.id}
             tenant={selectedTenant}
             settings={settings}
             onBack={() => setSelectedTenant(null)}
@@ -206,42 +234,59 @@ export function App() {
                   </button>
                 </div>
               ) : (
-                tenants.map((tenant) => (
-                  <div
-                    key={tenant.id}
-                    className="card"
-                    style={{
-                      cursor: 'pointer',
-                      background: 'linear-gradient(135deg, rgba(37, 99, 235, 0.12) 0%, rgba(6, 182, 212, 0.12) 100%)',
-                      border: '1px solid rgba(59, 130, 246, 0.35)',
-                      padding: '12px 14px',
-                      display: 'flex',
-                      justifyContent: 'space-between',
-                      alignItems: 'center',
-                      transition: 'all 0.2s ease',
-                    }}
-                    onClick={() => setSelectedTenant(tenant)}
-                  >
-                    <div>
-                      <div style={{ fontSize: '1rem', fontWeight: 800, color: '#fff', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                        <span>👤 Khách: {tenant.name}</span>
-                        {tenant.rooms.length > 1 && (
-                          <span className="card-badge badge-electric" style={{ fontSize: '0.65rem' }}>
-                            Cộng gộp {tenant.rooms.length} phòng
-                          </span>
-                        )}
+                tenants.map((tenant) => {
+                  const currentMonth = getDefaultBillingMonth(10);
+                  const hasDraft = (tenant.rooms || []).some((r) => !!getDraftReading(r.roomName, currentMonth));
+                  return (
+                    <div
+                      key={tenant.id}
+                      className="card"
+                      style={{
+                        cursor: 'pointer',
+                        background: 'linear-gradient(135deg, rgba(37, 99, 235, 0.12) 0%, rgba(6, 182, 212, 0.12) 100%)',
+                        border: '1px solid rgba(59, 130, 246, 0.35)',
+                        padding: '12px 14px',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        transition: 'all 0.2s ease',
+                      }}
+                      onClick={() => setSelectedTenant(tenant)}
+                    >
+                      <div>
+                        <div style={{ fontSize: '1rem', fontWeight: 800, color: '#fff', display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                          <span>👤 Khách: {tenant.name}</span>
+                          {tenant.rooms.length > 1 && (
+                            <span className="card-badge badge-electric" style={{ fontSize: '0.65rem' }}>
+                              Cộng gộp {tenant.rooms.length} phòng
+                            </span>
+                          )}
+                          {hasDraft && (
+                            <span
+                              className="card-badge"
+                              style={{
+                                background: 'rgba(245, 158, 11, 0.2)',
+                                color: '#fbbf24',
+                                border: '1px solid rgba(245, 158, 11, 0.4)',
+                                fontSize: '0.65rem',
+                              }}
+                            >
+                              📝 Có số tạm
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: '0.78rem', color: 'var(--accent-cyan)', marginTop: '3px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
+                          <Home size={12} /> {tenant.rooms.map((r) => `${r.roomName}`).join(' & ')}
+                        </div>
                       </div>
-                      <div style={{ fontSize: '0.78rem', color: 'var(--accent-cyan)', marginTop: '3px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '4px' }}>
-                        <Home size={12} /> {tenant.rooms.map((r) => `${r.roomName}`).join(' & ')}
-                      </div>
-                    </div>
 
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--accent-blue)', fontWeight: 800, fontSize: '0.85rem' }}>
-                      <span>Bắt đầu</span>
-                      <ArrowRight size={16} />
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px', color: 'var(--accent-blue)', fontWeight: 800, fontSize: '0.85rem' }}>
+                        <span>Bắt đầu</span>
+                        <ArrowRight size={16} />
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               )}
 
               {tenants.length > 0 && (

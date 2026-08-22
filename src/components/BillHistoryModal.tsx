@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import type { CombinedBillRecord } from '../types/calculator';
 import { X, Trash2, Calendar, ArrowRight, History, Layers, Search } from 'lucide-react';
-import { getCombinedBillHistory, deleteCombinedBillRecord, clearAllBillHistory, formatVND } from '../utils/calculator';
+import { getCombinedBillHistory, deleteCombinedBillRecord, clearAllBillHistory, formatVND, getTenants } from '../utils/calculator';
+import { syncTenantToCloud, reconcileCloudWithLocal, subscribeToRealtimeSync } from '../services/cloudSyncService';
 
 interface BillHistoryModalProps {
   onClose: () => void;
@@ -24,30 +25,46 @@ export const BillHistoryModal: React.FC<BillHistoryModalProps> = ({
   const [selectedMonthFilter, setSelectedMonthFilter] = useState<string>('all');
 
   useEffect(() => {
-    const history = getCombinedBillHistory();
-    setCombinedHistory(history);
-    const months = Array.from(new Set(history.map((r) => r.monthYear))).filter(Boolean);
-    if (months.length > 0) {
-      setSelectedMonthFilter(months[0]);
-    } else {
-      setSelectedMonthFilter('all');
-    }
+    const refreshHistory = () => {
+      setCombinedHistory(getCombinedBillHistory());
+    };
+    refreshHistory();
+
+    const unsubscribeSync = subscribeToRealtimeSync(refreshHistory);
+    window.addEventListener('storage', refreshHistory);
+    return () => {
+      if (unsubscribeSync) unsubscribeSync();
+      window.removeEventListener('storage', refreshHistory);
+    };
   }, []);
 
   const handleDeleteCombined = (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (confirm('Bạn có chắc muốn xóa hóa đơn này?')) {
+    if (confirm('Bạn có chắc muốn xóa hóa đơn này khỏi máy? (Lưu ý: Dữ liệu sẽ được tạm bảo lưu 5 phút trên Cloud trước khi xóa vĩnh viễn)')) {
+      const targetRecord = combinedHistory.find((r) => r.id === id);
       const updated = deleteCombinedBillRecord(id);
       setCombinedHistory(updated);
+
       const months = Array.from(new Set(updated.map((r) => r.monthYear))).filter(Boolean);
-      if (months.length > 0 && !months.includes(selectedMonthFilter)) {
-        setSelectedMonthFilter(months[0]);
+      if (selectedMonthFilter !== 'all' && !months.includes(selectedMonthFilter)) {
+        setSelectedMonthFilter('all');
+      }
+
+      // Đẩy mốc xóa ngầm lên Cloud ngay tức thì để thiết bị khác nhận biết lập tức
+      const tenants = getTenants();
+      const tenant = tenants.find(
+        (t) => (t.name || '').trim().toLowerCase() === (targetRecord?.tenantName || '').trim().toLowerCase()
+      );
+      if (tenant) {
+        syncTenantToCloud(tenant.id);
+      } else {
+        reconcileCloudWithLocal();
       }
     }
   };
 
   const handleClearAll = () => {
-    if (confirm('⚠️ Bạn có chắc muốn XÓA SẠCH TOÀN BỘ LỊCH SỬ HÓA ĐƠN CỦ? (Thao tác này giúp bạn thử nghiệm lại từ đầu)')) {
+    if (confirm('⚠️ Bạn có chắc muốn XÓA LỊCH SỬ HÓA ĐƠN TRÊN MÁY NÀY? (Dữ liệu gốc trên Cloud vẫn được bảo toàn)')) {
       clearAllBillHistory();
       setCombinedHistory([]);
       setSelectedMonthFilter('all');

@@ -1,6 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { X, Cloud, CloudUpload, FileJson, CheckCircle2, ShieldCheck, Mail, LogOut, RefreshCw, Loader2, Lock, UserPlus, LogIn, AlertTriangle, Send } from 'lucide-react';
-import { exportAllDataPackage, importAllDataPackage, type AppDataPackage } from '../utils/calculator';
+import React, { useState, useEffect } from 'react';
+import { X, Cloud, CloudUpload, CheckCircle2, ShieldCheck, Mail, LogOut, RefreshCw, Loader2, AlertTriangle, Send, LogIn, UserPlus, Lock } from 'lucide-react';
 import {
   auth,
   registerWithEmail,
@@ -11,10 +10,11 @@ import {
   getCurrentUser,
   sendVerificationEmail,
   checkIsEmailVerified,
+  parseDeletedAt,
 } from '../services/cloudSyncService';
+import { getPendingDeletions, getDeletionGracePeriodMs, getTenants, getCombinedBillHistory } from '../utils/calculator';
+import type { PendingDeletionRecord } from '../types/calculator';
 import { onAuthStateChanged } from 'firebase/auth';
-import { Filesystem, Directory } from '@capacitor/filesystem';
-import { Capacitor } from '@capacitor/core';
 
 interface CloudBackupModalProps {
   onClose: () => void;
@@ -26,12 +26,22 @@ export const CloudBackupModal: React.FC<CloudBackupModalProps> = ({ onClose, onD
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
 
+  // Live countdown state cho hàng chờ pendingDeletions
+  const [pendingList, setPendingList] = useState<PendingDeletionRecord[]>(getPendingDeletions());
+  const [now, setNow] = useState<number>(Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setNow(Date.now());
+      setPendingList(getPendingDeletions());
+    }, 1000);
+    return () => clearInterval(timer);
+  }, []);
+
   // Chế độ Auth: 'login' (Đăng nhập) hoặc 'register' (Đăng ký)
   const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
   const [emailInput, setEmailInput] = useState<string>('');
   const [passwordInput, setPasswordInput] = useState<string>('');
-
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Theo dõi trạng thái đăng nhập & tự động kiểm tra xác thực email
   useEffect(() => {
@@ -167,16 +177,6 @@ export const CloudBackupModal: React.FC<CloudBackupModalProps> = ({ onClose, onD
     try {
       setIsLoading(true);
 
-      // Bắt buộc xác thực email trước khi đồng bộ
-      const verCheck = await checkIsEmailVerified();
-      if (!verCheck.verified) {
-        setStatusMsg({
-          type: 'error',
-          text: '⚠️ Email của bạn chưa bấm link xác thực trong Gmail. Vui lòng mở Gmail xác thực trước khi đồng bộ!',
-        });
-        return;
-      }
-
       setStatusMsg({ type: 'info', text: '⏳ Đang sao lưu toàn bộ phòng trọ & hóa đơn lên Cloud...' });
       const res = await uploadLocalDataToCloud();
       if (res.success) {
@@ -185,7 +185,7 @@ export const CloudBackupModal: React.FC<CloudBackupModalProps> = ({ onClose, onD
         setStatusMsg({ type: 'error', text: res.message });
       }
     } catch (err: any) {
-      setStatusMsg({ type: 'error', text: 'Không thể tải dữ liệu lên Cloud.' });
+      setStatusMsg({ type: 'error', text: `Không thể tải dữ liệu lên Cloud: ${err.message || 'Lỗi kết nối'}` });
     } finally {
       setIsLoading(false);
     }
@@ -196,18 +196,8 @@ export const CloudBackupModal: React.FC<CloudBackupModalProps> = ({ onClose, onD
     try {
       setIsLoading(true);
 
-      // Bắt buộc xác thực email trước khi khôi phục
-      const verCheck = await checkIsEmailVerified();
-      if (!verCheck.verified) {
-        setStatusMsg({
-          type: 'error',
-          text: '⚠️ Email của bạn chưa bấm link xác thực trong Gmail. Vui lòng mở Gmail xác thực trước khi khôi phục!',
-        });
-        return;
-      }
-
       setStatusMsg({ type: 'info', text: '⏳ Đang lấy dữ liệu mới nhất từ Cloud...' });
-      const res = await downloadDataFromCloud();
+      const res = await downloadDataFromCloud(true, true);
       if (res.success) {
         onDataRestored();
         setStatusMsg({ type: 'success', text: res.message });
@@ -215,92 +205,38 @@ export const CloudBackupModal: React.FC<CloudBackupModalProps> = ({ onClose, onD
         setStatusMsg({ type: 'error', text: res.message });
       }
     } catch (err: any) {
-      setStatusMsg({ type: 'error', text: 'Không thể khôi phục dữ liệu từ Cloud.' });
+      setStatusMsg({ type: 'error', text: `Không thể khôi phục dữ liệu từ Cloud: ${err.message || 'Lỗi kết nối'}` });
     } finally {
       setIsLoading(false);
     }
   };
 
-
-
-  // 7. Xuất file dự phòng (.json) thủ công
-  const handleExportJsonFile = async () => {
-    try {
-      const pkg = exportAllDataPackage();
-      const jsonStr = JSON.stringify(pkg, null, 2);
-      const dateClean = new Date().toISOString().split('T')[0];
-      const fileName = `TinhTienTro_Backup_${dateClean}.json`;
-
-      if (Capacitor.isNativePlatform()) {
-        const base64Data = btoa(unescape(encodeURIComponent(jsonStr)));
-        try {
-          await Filesystem.writeFile({
-            path: `Download/${fileName}`,
-            data: base64Data,
-            directory: Directory.ExternalStorage,
-            recursive: true,
-          });
-          setStatusMsg({
-            type: 'success',
-            text: `📁 Đã lưu file vào thư mục "Tải về" (Download/${fileName}) của điện thoại!`,
-          });
-          return;
-        } catch (e1) {
-          await Filesystem.writeFile({
-            path: fileName,
-            data: base64Data,
-            directory: Directory.Documents,
-            recursive: true,
-          });
-          setStatusMsg({
-            type: 'success',
-            text: `📁 Đã lưu file vào thư mục "Tài liệu" (Documents/${fileName}) của điện thoại!`,
-          });
-          return;
-        }
+  // Lọc các bill đơn lẻ trùng lặp nếu đã có bill gộp đại diện
+  const combinedMonthSet = new Set<string>();
+  pendingList.forEach((p) => {
+    if (p.type === 'combinedBill') {
+      const raw = p.id.replace(/^combined_/, '');
+      const parts = raw.split('_');
+      if (parts.length >= 2) {
+        const monthKey = `${parts[parts.length - 2]}_${parts[parts.length - 1]}`;
+        combinedMonthSet.add(monthKey.toLowerCase());
       }
-
-      // Trình duyệt Web fallback
-      const blob = new Blob([jsonStr], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = fileName;
-      a.click();
-      URL.revokeObjectURL(url);
-
-      setStatusMsg({ type: 'success', text: `📁 Đã tải file sao lưu (${fileName}) về máy!` });
-    } catch (err) {
-      setStatusMsg({ type: 'error', text: 'Không thể xuất file sao lưu. Thử lại!' });
     }
-  };
+  });
 
-  // 8. Nhập file dự phòng (.json) từ máy
-  const handleImportJsonFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    const file = files[0];
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const text = event.target?.result as string;
-        const pkg: AppDataPackage = JSON.parse(text);
-        const ok = importAllDataPackage(pkg);
-        if (ok) {
-          onDataRestored();
-          setStatusMsg({
-            type: 'success',
-            text: `🎉 Đã nạp dữ liệu thành công từ file ${file.name}!`,
-          });
-        } else {
-          setStatusMsg({ type: 'error', text: 'Cấu trúc file backup không hợp lệ!' });
+  const displayPendingList = pendingList.filter((p) => {
+    if (p.type === 'singleBill') {
+      const raw = p.id.replace(/^single_/, '');
+      const parts = raw.split('_');
+      if (parts.length >= 2) {
+        const monthKey = `${parts[parts.length - 2]}_${parts[parts.length - 1]}`;
+        if (combinedMonthSet.has(monthKey.toLowerCase())) {
+          return false; // Ẩn bill đơn lẻ vì đã có bill gộp đại diện!
         }
-      } catch (err) {
-        setStatusMsg({ type: 'error', text: 'Không đọc được file JSON hợp lệ!' });
       }
-    };
-    reader.readAsText(file);
-  };
+    }
+    return true;
+  });
 
   return (
     <div className="modal-overlay" style={{ zIndex: 350 }}>
@@ -426,6 +362,8 @@ export const CloudBackupModal: React.FC<CloudBackupModalProps> = ({ onClose, onD
                 </div>
               )}
 
+
+
               {/* NÚT THAO TÁC ĐỒNG BỘ CLOUD */}
               <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
                 <button
@@ -449,9 +387,162 @@ export const CloudBackupModal: React.FC<CloudBackupModalProps> = ({ onClose, onD
                 </button>
               </div>
 
-              <div style={{ padding: '8px 10px', borderRadius: '6px', background: 'rgba(16, 185, 129, 0.1)', border: '1px solid rgba(16, 185, 129, 0.25)', fontSize: '0.73rem', color: '#34d399', textAlign: 'left', lineHeight: '1.4' }}>
-                ✨ <b>Tự Động Khôi Phục:</b> Khi bạn xóa APK và cài lại, chỉ cần đăng nhập email <b>{currentUser.email}</b>, toàn bộ phòng trọ & hóa đơn sẽ tự động được tải lại ngay lập tức!
-              </div>
+              {/* DANH SÁCH ĐẾM NGƯỢC HÀNG CHỜ XÓA TẠM BẢO LƯU (LIVE COUNTDOWN 5 PHÚT) */}
+              {displayPendingList.length > 0 && (
+                <div
+                  style={{
+                    background: 'rgba(245, 158, 11, 0.08)',
+                    border: '1px dashed rgba(245, 158, 11, 0.4)',
+                    borderRadius: 'var(--radius-md)',
+                    padding: '10px 12px',
+                    marginTop: '10px',
+                  }}
+                >
+                  <div
+                    style={{
+                      fontSize: '0.78rem',
+                      fontWeight: 800,
+                      color: '#f59e0b',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      marginBottom: '8px',
+                    }}
+                  >
+                    <span style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                      <RefreshCw size={14} className="spin" color="#f59e0b" /> Hàng chờ bảo lưu trên Cloud ({displayPendingList.length})
+                    </span>
+                    <span style={{ fontSize: '0.68rem', color: 'var(--text-muted)', fontWeight: 600 }}>Tự xóa sau 5p</span>
+                  </div>
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '160px', overflowY: 'auto' }}>
+                    {displayPendingList.map((p, idx) => {
+                      const dTime = parseDeletedAt(p.deletedAt);
+                      const elapsed = dTime > 0 ? now - dTime : 0;
+                      const graceMs = getDeletionGracePeriodMs();
+                      const remainingMs = Math.max(0, graceMs - elapsed);
+                      const totalSec = Math.floor(remainingMs / 1000);
+                      const hours = Math.floor(totalSec / 3600);
+                      const mins = Math.floor((totalSec % 3600) / 60);
+                      const secs = totalSec % 60;
+                      const formattedTime = hours > 0
+                        ? `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
+                        : `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                      const isExpired = remainingMs === 0;
+
+                      const resolveTenantDisplayName = (record: PendingDeletionRecord): string => {
+                        if (record.tenantName && !record.tenantName.startsWith('tenant-') && record.tenantName.trim() !== '') {
+                          return record.tenantName.trim();
+                        }
+                        try {
+                          const tenants = getTenants();
+                          const found = tenants.find((t) => t.id === record.id || (record.docId && record.docId.includes(t.id)));
+                          if (found && found.name && !found.name.startsWith('tenant-') && found.name.trim() !== '') {
+                            return found.name.trim();
+                          }
+                        } catch (e) {}
+                        try {
+                          const combined = getCombinedBillHistory();
+                          const foundC = combined.find((c) => {
+                            if (c.id === record.id) return true;
+                            if (record.docId && record.docId.toLowerCase().includes(c.tenantName.trim().toLowerCase())) return true;
+                            return false;
+                          });
+                          if (foundC && foundC.tenantName && !foundC.tenantName.startsWith('tenant-')) {
+                            return foundC.tenantName.trim();
+                          }
+                        } catch (e) {}
+                        if (record.docId && record.docId.includes('_')) {
+                          const parts = record.docId.split('_');
+                          const lastPart = parts[parts.length - 1];
+                          if (lastPart && !lastPart.startsWith('tenant-') && lastPart.trim() !== '') {
+                            return lastPart.charAt(0).toUpperCase() + lastPart.slice(1);
+                          }
+                        }
+                        if (record.id && record.id.includes('_')) {
+                          const parts = record.id.split('_');
+                          for (let i = 0; i < parts.length; i++) {
+                            const part = parts[i];
+                            if (part && !part.startsWith('tenant-') && !part.startsWith('combined') && !part.startsWith('single') && isNaN(Number(part)) && part.length > 1) {
+                              return part.charAt(0).toUpperCase() + part.slice(1);
+                            }
+                          }
+                        }
+                        if (record.tenantName && record.tenantName.trim() !== '') return record.tenantName.trim();
+                        return 'Hồ sơ';
+                      };
+
+                      let title = p.id;
+                      if (p.type === 'tenant') {
+                        title = `👤 ${resolveTenantDisplayName(p)}`;
+                      } else if (p.type === 'combinedBill') {
+                        const raw = p.id.replace(/^combined_/, '');
+                        const parts = raw.split('_');
+                        const monthStr = parts.length >= 3 ? `${parts[parts.length - 1]}/${parts[parts.length - 2]}` : raw;
+                        const tenantName = resolveTenantDisplayName(p);
+                        title = `🧾 ${tenantName !== 'Hồ sơ' ? tenantName : parts[0]} (${monthStr})`;
+                      } else if (p.type === 'singleBill') {
+                        const raw = p.id.replace(/^single_/, '');
+                        const parts = raw.split('_');
+                        if (parts.length >= 3) {
+                          const roomStr = parts.slice(0, parts.length - 2).join(' ');
+                          const monthStr = `${parts[parts.length - 1]}/${parts[parts.length - 2]}`;
+                          title = `📄 ${roomStr} (${monthStr})`;
+                        } else {
+                          title = `📄 ${raw}`;
+                        }
+                      }
+
+                      return (
+                        <div
+                          key={p.id || idx}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'space-between',
+                            background: 'rgba(0, 0, 0, 0.3)',
+                            padding: '6px 10px',
+                            borderRadius: 'var(--radius-sm)',
+                            fontSize: '0.74rem',
+                          }}
+                        >
+                          <span
+                            style={{
+                              fontWeight: 700,
+                              color: 'var(--text-primary)',
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              maxWidth: '210px',
+                            }}
+                            title={title}
+                          >
+                            {title}
+                          </span>
+
+                          <span
+                            style={{
+                              fontSize: '0.72rem',
+                              fontWeight: 800,
+                              padding: '2px 8px',
+                              borderRadius: '12px',
+                              background: isExpired ? 'rgba(239, 68, 68, 0.2)' : 'rgba(245, 158, 11, 0.2)',
+                              color: isExpired ? '#f87171' : '#fbbf24',
+                              border: `1px solid ${isExpired ? 'rgba(239, 68, 68, 0.4)' : 'rgba(245, 158, 11, 0.4)'}`,
+                              fontFamily: 'monospace',
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                            }}
+                          >
+                            {isExpired ? '🔥 Tiêu hủy...' : `⏱️ ${formattedTime}`}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               <button
                 type="button"
@@ -583,43 +674,6 @@ export const CloudBackupModal: React.FC<CloudBackupModalProps> = ({ onClose, onD
               </form>
             </div>
           )}
-        </div>
-
-        {/* THẺ XUẤT NẠP FILE (.JSON) DỰ PHÒNG THỦ CÔNG */}
-        <div className="card" style={{ padding: '12px', background: 'rgba(255,255,255,0.03)' }}>
-          <div style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--text-primary)', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <FileJson size={16} color="#f59e0b" /> Sao Lưu Dự Phòng Thủ Công (File .json)
-          </div>
-          <p style={{ fontSize: '0.73rem', color: 'var(--text-muted)', marginBottom: '8px' }}>
-            Xuất/Nạp file dữ liệu dự phòng trực tiếp trên bộ nhớ thiết bị.
-          </p>
-
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <button
-              type="button"
-              className="btn-secondary"
-              style={{ flex: 1, padding: '8px 6px', fontSize: '0.76rem', gap: '4px', color: '#fbbf24', borderColor: 'rgba(245, 158, 11, 0.4)' }}
-              onClick={handleExportJsonFile}
-            >
-              <FileJson size={14} /> Xuất File Backup
-            </button>
-
-            <button
-              type="button"
-              className="btn-secondary"
-              style={{ flex: 1, padding: '8px 6px', fontSize: '0.76rem', gap: '4px', color: '#a78bfa', borderColor: 'rgba(139, 92, 246, 0.4)' }}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <RefreshCw size={14} /> Nạp Dữ Liệu Từ File
-            </button>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".json"
-              style={{ display: 'none' }}
-              onChange={handleImportJsonFile}
-            />
-          </div>
         </div>
       </div>
     </div>

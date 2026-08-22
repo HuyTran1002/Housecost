@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import type { Tenant, TenantRoom } from '../types/calculator';
 import { X, Plus, Trash2, UserPlus, Users, Home, Save, Edit3 } from 'lucide-react';
 import { getTenants, saveTenant, deleteTenant, formatInputNumber, parseFormattedNumber, formatNumber } from '../utils/calculator';
+import { syncTenantToCloud, deleteTenantFromCloud } from '../services/cloudSyncService';
 
 interface TenantManagerModalProps {
   onClose: () => void;
@@ -80,6 +81,34 @@ export const TenantManagerModal: React.FC<TenantManagerModalProps> = ({
     e.preventDefault();
     if (!tenantName.trim()) return;
 
+    // 1. Kiểm tra trùng lặp tên phòng ngay trong form hiện tại
+    const roomNameSet = new Set<string>();
+    for (const r of rooms) {
+      const cleanR = r.roomName.trim().toLowerCase();
+      if (!cleanR) continue;
+      if (roomNameSet.has(cleanR)) {
+        alert(`⚠️ Tên phòng "${r.roomName.trim()}" bị nhập trùng lặp nhiều lần trong danh sách! Vui lòng kiểm tra lại.`);
+        return;
+      }
+      roomNameSet.add(cleanR);
+    }
+
+    // 2. Kiểm tra trùng lặp phòng với các Khách Thuê KHÁC trong hệ thống
+    const otherTenants = tenants.filter((t) => t.id !== editingTenantId);
+    for (const r of rooms) {
+      const cleanR = r.roomName.trim().toLowerCase();
+      if (!cleanR) continue;
+
+      const conflictingTenant = otherTenants.find((t) =>
+        (t.rooms || []).some((tr) => (tr.roomName || '').trim().toLowerCase() === cleanR)
+      );
+
+      if (conflictingTenant) {
+        alert(`⚠️ Tên phòng "${r.roomName.trim()}" đã thuộc về khách thuê [${conflictingTenant.name}]!\nMột phòng chỉ thuộc về 1 khách thuê duy nhất.`);
+        return;
+      }
+    }
+
     const formattedRooms: TenantRoom[] = rooms.map((r) => ({
       roomName: r.roomName.trim() || 'Phòng trọ',
       defaultRent: parseFormattedNumber(r.defaultRent),
@@ -93,6 +122,8 @@ export const TenantManagerModal: React.FC<TenantManagerModalProps> = ({
     };
 
     const updated = saveTenant(newTenant);
+    syncTenantToCloud(newTenant.id);
+
     setTenants(updated);
     setIsAdding(false);
     setEditingTenantId(null);
@@ -105,6 +136,7 @@ export const TenantManagerModal: React.FC<TenantManagerModalProps> = ({
     e.stopPropagation();
     if (confirm('Bạn có chắc muốn xóa khách thuê này?')) {
       const updated = deleteTenant(id);
+      deleteTenantFromCloud(id);
       setTenants(updated);
     }
   };

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import type { Settings } from '../types/calculator';
-import { X, Save, RotateCcw, Zap, Droplets } from 'lucide-react';
-import { DEFAULT_SETTINGS, formatVND, formatNumber, formatInputNumber, parseFormattedNumber } from '../utils/calculator';
+import { X, Save, RotateCcw, Zap, Droplets, Clock } from 'lucide-react';
+import { DEFAULT_SETTINGS, formatVND, formatNumber, formatInputNumber, parseFormattedNumber, formatDurationSeconds } from '../utils/calculator';
 
 interface SettingsModalProps {
   settings: Settings;
@@ -15,6 +15,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onSave, 
     waterTier1Limit: settings.waterTier1Limit ? formatNumber(settings.waterTier1Limit) : '',
     waterTier1Rate: settings.waterTier1Rate ? formatNumber(settings.waterTier1Rate) : '',
     waterTier2Rate: settings.waterTier2Rate ? formatNumber(settings.waterTier2Rate) : '',
+    deletionGracePeriodSeconds: settings.deletionGracePeriodSeconds ? formatNumber(settings.deletionGracePeriodSeconds) : '300',
   });
 
   const handleChange = (field: keyof Settings, rawValue: string) => {
@@ -28,16 +29,18 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onSave, 
       waterTier1Limit: formatNumber(DEFAULT_SETTINGS.waterTier1Limit),
       waterTier1Rate: formatNumber(DEFAULT_SETTINGS.waterTier1Rate),
       waterTier2Rate: formatNumber(DEFAULT_SETTINGS.waterTier2Rate),
+      deletionGracePeriodSeconds: formatNumber(DEFAULT_SETTINGS.deletionGracePeriodSeconds || 300),
     });
   };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     onSave({
-      electricityRate: parseFormattedNumber(formData.electricityRate),
-      waterTier1Limit: parseFormattedNumber(formData.waterTier1Limit),
-      waterTier1Rate: parseFormattedNumber(formData.waterTier1Rate),
-      waterTier2Rate: parseFormattedNumber(formData.waterTier2Rate),
+      electricityRate: parseFormattedNumber(formData.electricityRate || ''),
+      waterTier1Limit: parseFormattedNumber(formData.waterTier1Limit || ''),
+      waterTier1Rate: parseFormattedNumber(formData.waterTier1Rate || ''),
+      waterTier2Rate: parseFormattedNumber(formData.waterTier2Rate || ''),
+      deletionGracePeriodSeconds: parseFormattedNumber(formData.deletionGracePeriodSeconds || '') || 300,
     });
     onClose();
   };
@@ -142,6 +145,64 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ settings, onSave, 
               <p style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginTop: '4px' }}>
                 Mặc định: {formatVND(DEFAULT_SETTINGS.waterTier2Rate)} / khối
               </p>
+            </div>
+          </div>
+
+          {/* Cấu hình Thời gian bảo lưu Hàng chờ xóa */}
+          <div className="card" style={{ background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
+            <div className="card-header">
+              <span className="card-title" style={{ color: '#f59e0b', fontSize: '0.86rem' }}>
+                <Clock size={16} color="#f59e0b" /> Thời gian Hàng chờ Xóa (Cloud Auto-Purge)
+              </span>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">Nhập thời gian đếm ngược (Đơn vị: GIÂY)</label>
+              <div className="input-wrapper">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className="form-input"
+                  style={{ textAlign: 'left' }}
+                  value={formData.deletionGracePeriodSeconds}
+                  onChange={(e) => handleChange('deletionGracePeriodSeconds', e.target.value)}
+                  placeholder="300"
+                />
+                <span className="input-unit">giây</span>
+              </div>
+
+              {/* Tự động hiển thị dạng giờ / phút / giây */}
+              <div style={{ fontSize: '0.78rem', fontWeight: 800, color: '#fbbf24', marginTop: '6px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                ⏱️ Tự động quy đổi: {formatDurationSeconds(parseFormattedNumber(formData.deletionGracePeriodSeconds || ''))}
+              </div>
+
+              {/* Nút bấm chọn nhanh Preset */}
+              <div style={{ display: 'flex', gap: '5px', marginTop: '8px', flexWrap: 'wrap' }}>
+                {[
+                  { label: '⚡ 30s (Test nhanh)', val: 30 },
+                  { label: '⏱️ 5 phút (300s)', val: 300 },
+                  { label: '🕒 1 giờ (3600s)', val: 3600 },
+                  { label: '📅 24 giờ (86400s)', val: 86400 },
+                ].map((item) => (
+                  <button
+                    key={item.val}
+                    type="button"
+                    style={{
+                      padding: '4px 8px',
+                      fontSize: '0.7rem',
+                      fontWeight: 700,
+                      borderRadius: '4px',
+                      border: '1px solid rgba(245, 158, 11, 0.4)',
+                      background: parseFormattedNumber(formData.deletionGracePeriodSeconds || '') === item.val ? '#f59e0b' : 'rgba(0,0,0,0.3)',
+                      color: parseFormattedNumber(formData.deletionGracePeriodSeconds || '') === item.val ? '#000' : '#fbbf24',
+                      cursor: 'pointer',
+                    }}
+                    onClick={() => handleChange('deletionGracePeriodSeconds', item.val.toString())}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
