@@ -212,6 +212,22 @@ export function getPreviousReading(roomName: string, selectedMonthYear?: string)
   if (!roomName || !roomName.trim() || !selectedMonthYear) return null;
   const targetRoom = roomName.trim().toLowerCase();
 
+  // Nếu phòng này thuộc hồ sơ đang nằm trong hàng chờ xóa pendingDeletions -> Bỏ qua chỉ số cũ
+  const pendingDeletions = getPendingDeletions();
+  const pendingTenantNames = new Set(
+    pendingDeletions.filter((p) => p.type === 'tenant').map((p) => (p.tenantName || '').trim().toLowerCase()).filter(Boolean)
+  );
+  const pendingRooms = new Set<string>();
+  pendingDeletions.forEach((p) => {
+    if (p.type === 'tenant' && p.tenantData && Array.isArray(p.tenantData.rooms)) {
+      p.tenantData.rooms.forEach((r) => {
+        if (r.roomName) pendingRooms.add(r.roomName.trim().toLowerCase());
+      });
+    }
+  });
+
+  if (pendingRooms.has(targetRoom)) return null;
+
   const prevKeys = getPreviousMonthKeys(selectedMonthYear);
   if (prevKeys.length === 0) return null;
 
@@ -227,6 +243,9 @@ export function getPreviousReading(roomName: string, selectedMonthYear?: string)
   // BƯỚC 1: Ưu tiên cao nhất Hóa Đơn Gộp (Combined History)
   const combinedHistory = getCombinedBillHistory();
   for (const record of combinedHistory) {
+    const recTenant = (record.tenantName || '').trim().toLowerCase();
+    if (recTenant && pendingTenantNames.has(recTenant)) continue;
+
     if (isMatchingMonth(record.monthYear || '')) {
       for (const item of record.roomItems || []) {
         const itemRoom = (item.roomName || item.input?.roomName || '').trim().toLowerCase();
@@ -393,12 +412,13 @@ export function saveDraftReading(draftInput: {
   return updatedDraft;
 }
 
-export function deleteDraftReading(roomName: string, monthYear: string): DraftReading[] {
+export function deleteDraftReading(roomName: string, monthYear?: string): DraftReading[] {
   const targetRoom = (roomName || '').trim().toLowerCase();
-  const targetMonth = normalizeMonthKey(monthYear).toLowerCase();
+  const targetMonth = monthYear ? normalizeMonthKey(monthYear).toLowerCase() : '';
 
   const drafts = getDraftReadings().filter((item) => {
     const rMatch = (item.roomName || '').trim().toLowerCase() === targetRoom;
+    if (!monthYear) return !rMatch;
     const mMatch = normalizeMonthKey(item.monthYear).toLowerCase() === targetMonth;
     return !(rMatch && mMatch);
   });
@@ -438,9 +458,20 @@ export function getBillHistory(): BillRecord[] {
 
       const pendingIds = new Set(pendingDeletions.map((p) => p.id));
 
+      const pendingRooms = new Set<string>();
+      pendingDeletions.forEach((p) => {
+        if (p.type === 'tenant' && p.tenantData && Array.isArray(p.tenantData.rooms)) {
+          p.tenantData.rooms.forEach((r) => {
+            if (r.roomName) pendingRooms.add(r.roomName.trim().toLowerCase());
+          });
+        }
+      });
+
       return records.filter((rec) => {
         if (!rec || !rec.id) return false;
         if (deletedBillIds.has(rec.id) || pendingIds.has(rec.id)) return false;
+        const roomNameLower = (rec.input?.roomName || '').trim().toLowerCase();
+        if (roomNameLower && pendingRooms.has(roomNameLower)) return false;
         return true;
       });
     }
@@ -819,10 +850,44 @@ export function purgeTenantHistory(tenantName?: string, docId?: string, tenantId
 
     if (!nameLower && !docLower && !idLower) return;
 
-    // 1. Dọn dẹp trực tiếp dữ liệu thô Combined History từ localStorage
+    // Thu thập toàn bộ danh sách tên phòng thuộc khách thuê bị tiêu hủy
+    const targetRoomNames = new Set<string>();
+
+    // 0. Quét phòng từ pendingDeletions
+    const pendingList = getPendingDeletions();
+    pendingList.forEach((p) => {
+      if (p.type === 'tenant') {
+        const pName = (p.tenantName || '').trim().toLowerCase();
+        const pDoc = (p.docId || '').trim().toLowerCase();
+        const pId = (p.id || '').trim().toLowerCase();
+
+        if ((nameLower && pName === nameLower) || (docLower && pDoc === docLower) || (idLower && pId === idLower)) {
+          if (p.tenantData && Array.isArray(p.tenantData.rooms)) {
+            p.tenantData.rooms.forEach((r) => {
+              if (r.roomName) targetRoomNames.add(r.roomName.trim().toLowerCase());
+            });
+          }
+        }
+      }
+    });
+
+    // 1. Dọn dẹp trực tiếp dữ liệu thô Combined History từ localStorage & thu thập danh sách phòng
     const rawCombined = localStorage.getItem(COMBINED_HISTORY_KEY);
     if (rawCombined) {
       const combinedHistory: CombinedBillRecord[] = JSON.parse(rawCombined);
+      combinedHistory.forEach((c) => {
+        const cTenant = (c.tenantName || '').trim().toLowerCase();
+        const cDoc = getTenantDocId({ name: c.tenantName || '', id: '' }).toLowerCase();
+
+        if ((nameLower && cTenant === nameLower) || (docLower && (cDoc === docLower || cDoc.includes(docLower) || docLower.includes(cDoc)))) {
+          if (Array.isArray(c.roomItems)) {
+            c.roomItems.forEach((r) => {
+              if (r.roomName) targetRoomNames.add(r.roomName.trim().toLowerCase());
+            });
+          }
+        }
+      });
+
       const updatedCombined = combinedHistory.filter((c) => {
         const cTenant = (c.tenantName || '').trim().toLowerCase();
         const cDoc = getTenantDocId({ name: c.tenantName || '', id: '' }).toLowerCase();
@@ -834,18 +899,35 @@ export function purgeTenantHistory(tenantName?: string, docId?: string, tenantId
       localStorage.setItem(COMBINED_HISTORY_KEY, JSON.stringify(updatedCombined));
     }
 
-    // 2. Dọn dẹp trực tiếp dữ liệu thô Single History từ localStorage
+    // 2. Dọn dẹp trực tiếp dữ liệu thô Single History từ localStorage theo Tên Khách, ID và Tên Phòng
     const rawSingle = localStorage.getItem(HISTORY_KEY);
     if (rawSingle) {
       const singleHistory: BillRecord[] = JSON.parse(rawSingle);
       const updatedSingle = singleHistory.filter((s) => {
+        if (!s) return false;
+        const sRoom = (s.input?.roomName || '').trim().toLowerCase();
+
         if (idLower && s.id && s.id.toLowerCase().includes(idLower)) return false;
+        if (sRoom && targetRoomNames.has(sRoom)) return false;
         return true;
       });
       localStorage.setItem(HISTORY_KEY, JSON.stringify(updatedSingle));
     }
 
-    // 3. Đảm bảo TENANTS_KEY cũng được dọn sạch hoàn toàn khỏi dữ liệu thô
+    // 3. Dọn dẹp trực tiếp dữ liệu thô Số Tạm (Draft Readings) theo Tên Phòng
+    const rawDrafts = localStorage.getItem(DRAFT_READINGS_KEY);
+    if (rawDrafts && targetRoomNames.size > 0) {
+      const drafts: DraftReading[] = JSON.parse(rawDrafts);
+      const updatedDrafts = drafts.filter((d) => {
+        if (!d) return false;
+        const dRoom = (d.roomName || '').trim().toLowerCase();
+        if (dRoom && targetRoomNames.has(dRoom)) return false;
+        return true;
+      });
+      localStorage.setItem(DRAFT_READINGS_KEY, JSON.stringify(updatedDrafts));
+    }
+
+    // 4. Đảm bảo TENANTS_KEY cũng được dọn sạch hoàn toàn khỏi dữ liệu thô
     const rawTenants = localStorage.getItem(TENANTS_KEY);
     if (rawTenants) {
       const tenantsList: Tenant[] = JSON.parse(rawTenants);
@@ -1267,6 +1349,11 @@ export function deleteTenant(id: string, createPending: boolean = true): Tenant[
   const updated = tenants.filter((t) => t.id !== id);
   try {
     localStorage.setItem(TENANTS_KEY, JSON.stringify(updated));
+    if (targetTenant && Array.isArray(targetTenant.rooms)) {
+      targetTenant.rooms.forEach((r) => {
+        deleteDraftReading(r.roomName);
+      });
+    }
     if (typeof window !== 'undefined') window.dispatchEvent(new Event('localDataChanged'));
     if (targetTenant) {
       removeRestoredId(id);
