@@ -866,6 +866,36 @@ export function removePendingDeletion(id: string): PendingDeletionRecord[] {
   }
 }
 
+export function removePendingDeletionForTenant(tenantName?: string, tenantId?: string, docId?: string): PendingDeletionRecord[] {
+  try {
+    const normName = (tenantName || '').trim().toLowerCase();
+    const normId = (tenantId || '').trim().toLowerCase();
+    const normDoc = (docId || '').trim().toLowerCase();
+    const cleanDoc = normName ? getTenantDocId({ name: normName, id: '' }).toLowerCase() : '';
+
+    const list = getPendingDeletions().filter((item) => {
+      const itemId = (item.id || '').trim().toLowerCase();
+      const itemDoc = (item.docId || '').trim().toLowerCase();
+      const itemName = (item.tenantName || '').trim().toLowerCase();
+
+      // Nếu mốc xóa này thuộc về khách thuê đang được khôi phục -> Xóa khỏi pendingDeletions
+      if (item.type === 'tenant') {
+        if (normId && (itemId === normId || itemDoc === normId)) return false;
+        if (normDoc && (itemId === normDoc || itemDoc === normDoc)) return false;
+        if (normName && itemName === normName) return false;
+        if (cleanDoc && (itemId.includes(cleanDoc) || itemDoc.includes(cleanDoc))) return false;
+        if (normName && (itemId.includes(normName) || itemDoc.includes(normName))) return false;
+      }
+      return true;
+    });
+
+    localStorage.setItem(PENDING_DELETIONS_KEY, JSON.stringify(list));
+    return list;
+  } catch (e) {
+    return getPendingDeletions();
+  }
+}
+
 export function purgeTenantHistory(tenantName?: string, docId?: string, tenantId?: string): void {
   try {
     const nameLower = (tenantName || '').trim().toLowerCase();
@@ -1220,6 +1250,9 @@ export function undoPendingDeletion(id: string): void {
       let currentTenants: Tenant[] = rawSavedTenants ? JSON.parse(rawSavedTenants) : [];
       const targetNameLower = (targetPending.tenantName || '').trim().toLowerCase();
 
+      // 4.0 Gỡ SẠCH toàn bộ mốc xóa (tombstone) liên quan đến tên khách thuê này khỏi pendingDeletions
+      removePendingDeletionForTenant(targetPending.tenantName, targetPending.id, targetPending.docId);
+
       const existingIndex = currentTenants.findIndex((t) => {
         if (t.id === id || (targetPending.id && t.id === targetPending.id)) return true;
         if (targetNameLower && (t.name || '').trim().toLowerCase() === targetNameLower) return true;
@@ -1247,6 +1280,10 @@ export function undoPendingDeletion(id: string): void {
         localStorage.setItem(TENANTS_KEY, JSON.stringify(currentTenants));
       } else {
         restoredTenantObj = currentTenants[existingIndex];
+      }
+
+      if (restoredTenantObj) {
+        removePendingDeletionForTenant(restoredTenantObj.name, restoredTenantObj.id, getTenantDocId(restoredTenantObj));
       }
 
       // 4.1 Giải phóng TOÀN BỘ mốc xóa hóa đơn (gộp & phòng đơn) thuộc Hồ sơ này ở local
