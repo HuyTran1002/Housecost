@@ -1213,7 +1213,7 @@ export function undoPendingDeletion(id: string): void {
       }
     }
 
-    // 4. NẾU HOÀN TÁC KHÁCH THUÊ: Phục hồi Hồ sơ khách thuê và đồng bộ tự động lên Cloud
+    // 4. NẾU HOÀN TÁC KHÁCH THUÊ: Phục hồi Hồ sơ khách thuê, giải phóng mốc xóa hóa đơn và đồng bộ tự động 2 chiều
     let restoredTenantObj: Tenant | undefined;
     if (targetPending && (targetPending.type === 'tenant' || id.startsWith('tenant-'))) {
       const rawSavedTenants = localStorage.getItem(TENANTS_KEY);
@@ -1245,17 +1245,54 @@ export function undoPendingDeletion(id: string): void {
 
         currentTenants.push(restoredTenantObj);
         localStorage.setItem(TENANTS_KEY, JSON.stringify(currentTenants));
-        if (typeof window !== 'undefined') window.dispatchEvent(new Event('localDataChanged'));
       } else {
         restoredTenantObj = currentTenants[existingIndex];
       }
 
-      if (restoredTenantObj && typeof window !== 'undefined' && typeof navigator !== 'undefined' && navigator.onLine) {
-        setTimeout(() => {
-          import('../services/cloudSyncService').then((m) => {
-            m.syncTenantToCloud(restoredTenantObj!.id).catch(() => null);
-          });
-        }, 200);
+      // 4.1 Giải phóng TOÀN BỘ mốc xóa hóa đơn (gộp & phòng đơn) thuộc Hồ sơ này ở local
+      const roomNames = restoredTenantObj && Array.isArray(restoredTenantObj.rooms)
+        ? restoredTenantObj.rooms.map((r) => (r.roomName || '').trim().toLowerCase())
+        : [];
+
+      getRawCombinedBillHistory().forEach((c) => {
+        const cTenant = (c.tenantName || '').trim().toLowerCase();
+        const hasRoomMatch = c.roomItems && Array.isArray(c.roomItems) && c.roomItems.some((r) => roomNames.includes((r.roomName || '').trim().toLowerCase()));
+        if ((targetNameLower && cTenant === targetNameLower) || hasRoomMatch) {
+          if (c.id) {
+            removePendingDeletion(c.id);
+            removeDeletedBillId(c.id);
+            addRestoredId(c.id);
+          }
+        }
+      });
+
+      getRawBillHistory().forEach((s) => {
+        const sRoom = (s.input?.roomName || '').trim().toLowerCase();
+        if (roomNames.includes(sRoom)) {
+          if (s.id) {
+            removePendingDeletion(s.id);
+            removeDeletedBillId(s.id);
+            addRestoredId(s.id);
+          }
+        }
+      });
+
+      // 4.2 Đẩy đồng bộ lên Cloud và lập tức làm mới dữ liệu 2 chiều trên máy chủ bấm
+      if (restoredTenantObj && typeof window !== 'undefined') {
+        if (typeof navigator !== 'undefined' && navigator.onLine) {
+          setTimeout(() => {
+            import('../services/cloudSyncService').then(async (m) => {
+              await m.syncTenantToCloud(restoredTenantObj!.id).catch(() => null);
+              const syncData = getTenantSyncData(restoredTenantObj!.id);
+              if (syncData) {
+                applyTenantSyncData(syncData, true);
+              }
+              window.dispatchEvent(new Event('localDataChanged'));
+            });
+          }, 100);
+        } else {
+          window.dispatchEvent(new Event('localDataChanged'));
+        }
       }
     }
 
