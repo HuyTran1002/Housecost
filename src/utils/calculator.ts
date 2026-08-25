@@ -440,12 +440,7 @@ export function clearAllDraftReadings(): void {
   }
 }
 
-export function removeDeletedBillId(id: string): void {
-  try {
-    const list = getDeletedBillIds().filter((item) => item !== id);
-    localStorage.setItem(DELETED_BILL_IDS_KEY, JSON.stringify(list));
-  } catch (e) {}
-}
+
 
 // LỊCH SỬ HÓA ĐƠN ĐƠN THÔ (Raw Single History không qua bộ lọc ẩn 5 phút)
 export function getRawBillHistory(): BillRecord[] {
@@ -734,6 +729,40 @@ export function addDeletedBillId(id: string): void {
 export function clearDeletedBillIds(): void {
   try {
     localStorage.removeItem(DELETED_BILL_IDS_KEY);
+  } catch (e) {}
+}
+
+export function removeDeletedBillId(id: string): void {
+  try {
+    const rawId = (id || '').trim().toLowerCase();
+    if (!rawId) return;
+    const rawList: string[] = JSON.parse(localStorage.getItem(DELETED_BILL_IDS_KEY) || '[]');
+    const list = rawList.filter((item) => {
+      const itemLower = (item || '').trim().toLowerCase();
+      if (itemLower === rawId) return false;
+      if (rawId.length >= 3 && itemLower.length >= 3 && (rawId.includes(itemLower) || itemLower.includes(rawId))) return false;
+      return true;
+    });
+    localStorage.setItem(DELETED_BILL_IDS_KEY, JSON.stringify(list));
+  } catch (e) {}
+}
+
+export function purgeTenantDeletedBillIds(tenantName?: string, roomNames: string[] = []): void {
+  try {
+    const tNameLower = (tenantName || '').trim().toLowerCase();
+    const normRooms = roomNames.map((r) => r.trim().toLowerCase());
+    const rawList: string[] = JSON.parse(localStorage.getItem(DELETED_BILL_IDS_KEY) || '[]');
+
+    const updatedList = rawList.filter((bId) => {
+      const lower = bId.trim().toLowerCase();
+      if (tNameLower && lower.includes(tNameLower)) return false;
+      for (const r of normRooms) {
+        if (r && lower.includes(r)) return false;
+      }
+      return true;
+    });
+
+    localStorage.setItem(DELETED_BILL_IDS_KEY, JSON.stringify(updatedList));
   } catch (e) {}
 }
 
@@ -1290,6 +1319,9 @@ export function undoPendingDeletion(id: string): void {
       const roomNames = restoredTenantObj && Array.isArray(restoredTenantObj.rooms)
         ? restoredTenantObj.rooms.map((r) => (r.roomName || '').trim().toLowerCase())
         : [];
+
+      // Dọn sạch DELETED_BILL_IDS_KEY cho tất cả hóa đơn thuộc khách thuê và tên phòng của khách đó
+      purgeTenantDeletedBillIds(targetPending.tenantName || restoredTenantObj?.name, roomNames);
 
       getRawCombinedBillHistory().forEach((c) => {
         const cTenant = (c.tenantName || '').trim().toLowerCase();
