@@ -1618,7 +1618,6 @@ export function applyTenantSyncData(syncData: TenantSyncData, isManualRestore: b
 
   const tenant = syncData.tenant;
   const tenantNameKey = (tenant.name || '').trim().toLowerCase();
-  const roomNamesKeys = (tenant.rooms || []).map((r) => (r.roomName || '').trim().toLowerCase());
   const settings = getSettings();
   const targetDocId = getTenantDocId(tenant);
 
@@ -1756,36 +1755,25 @@ export function applyTenantSyncData(syncData: TenantSyncData, isManualRestore: b
     (item) => !deletedBillIds.has(item.id) && !pendingBillIds.has(item.id)
   );
 
-  // Lọc ra các hóa đơn gộp thuộc về các khách khác (không thuộc khách thuê đang đồng bộ)
+  // Lọc ra các hóa đơn gộp thuộc về tất cả các khách (không bị xóa vĩnh viễn hoặc nằm trong mốc xóa)
   const localCombined = getRawCombinedBillHistory().filter(
     (item) => !deletedBillIds.has(item.id) && !pendingBillIds.has(item.id)
   );
 
-  const nonTenantCombined = localCombined.filter((c) => {
-    const cTenant = (c.tenantName || '').trim().toLowerCase();
-    // Loại bỏ toàn bộ hóa đơn của KHÁCH NÀY khỏi local (Cloud đã là nguồn chân lý)
-    if (cTenant === tenantNameKey) return false;
-    if (c.roomItems && Array.isArray(c.roomItems)) {
-      return !c.roomItems.some((r) => roomNamesKeys.includes((r.roomName || '').trim().toLowerCase()));
-    }
-    return true;
-  });
-
-  // Khử trùng ID tuyệt đối bằng Map cho Combined History (Chống nhân bản trùng lập hóa đơn)
+  // Khử trùng ID tuyệt đối bằng Map cho Combined History (Bảo tồn 100% dữ liệu cả Local và Cloud)
   const combinedMap = new Map<string, CombinedBillRecord>();
 
-  cleanRecalculatedCombined.forEach((item) => {
+  // 1. Nạp tất cả các hóa đơn gộp hiện có ở local trước (Bảo tồn dữ liệu local khi hoàn tác/khôi phục)
+  localCombined.forEach((item) => {
     if (item && item.id) {
       combinedMap.set(item.id.trim().toLowerCase(), item);
     }
   });
 
-  nonTenantCombined.forEach((item) => {
+  // 2. Nạp thêm các hóa đơn gộp từ Cloud (nếu Cloud gửi về bản ghi mới hoặc cập nhật)
+  cleanRecalculatedCombined.forEach((item) => {
     if (item && item.id) {
-      const key = item.id.trim().toLowerCase();
-      if (!combinedMap.has(key)) {
-        combinedMap.set(key, item);
-      }
+      combinedMap.set(item.id.trim().toLowerCase(), item);
     }
   });
 
@@ -1809,27 +1797,20 @@ export function applyTenantSyncData(syncData: TenantSyncData, isManualRestore: b
     (item: BillRecord) => !deletedBillIds.has(item.id) && !pendingBillIds.has(item.id)
   );
 
-  // Loại bỏ toàn bộ hóa đơn đơn lẻ của KHÁCH NÀY khỏi local (Cloud đã là nguồn chân lý)
-  const nonTenantSingle = localSingle.filter((s: BillRecord) => {
-    const sRoom = (s.input?.roomName || '').trim().toLowerCase();
-    return !roomNamesKeys.includes(sRoom);
-  });
-
-  // Khử trùng ID tuyệt đối bằng Map cho Single History
+  // Khử trùng ID tuyệt đối bằng Map cho Single History (Bảo tồn 100% dữ liệu cả Local và Cloud)
   const singleMap = new Map<string, BillRecord>();
 
-  cleanRecalculatedSingle.forEach((item) => {
+  // 1. Nạp tất cả các hóa đơn phòng đơn hiện có ở local trước
+  localSingle.forEach((item) => {
     if (item && item.id) {
       singleMap.set(item.id.trim().toLowerCase(), item);
     }
   });
 
-  nonTenantSingle.forEach((item) => {
+  // 2. Nạp thêm các hóa đơn phòng đơn từ Cloud
+  cleanRecalculatedSingle.forEach((item) => {
     if (item && item.id) {
-      const key = item.id.trim().toLowerCase();
-      if (!singleMap.has(key)) {
-        singleMap.set(key, item);
-      }
+      singleMap.set(item.id.trim().toLowerCase(), item);
     }
   });
 
