@@ -366,30 +366,38 @@ export const TenantCalculatorWizard: React.FC<TenantCalculatorWizardProps> = ({
               </label>
               <div
                 className="input-wrapper"
-                style={{ cursor: 'pointer' }}
-                onClick={(e) => {
-                  const input = e.currentTarget.querySelector('input');
-                  if (input) {
-                    try {
-                      input.showPicker?.();
-                    } catch (err) {}
-                  }
+                style={{
+                  position: 'relative',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  background: 'rgba(0, 0, 0, 0.3)',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 'var(--radius-sm)',
+                  padding: '9px 12px',
+                  width: '100%',
                 }}
               >
-                <Calendar className="input-icon" size={14} />
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', width: '100%', pointerEvents: 'none' }}>
+                  <Calendar size={16} color="var(--accent-cyan)" />
+                  <span style={{ fontSize: '0.98rem', fontWeight: 800, color: 'var(--accent-cyan)' }}>
+                    {formatMonthDisplay(monthYear)}
+                  </span>
+                </div>
                 <input
                   type="month"
-                  className="form-input"
                   style={{
-                    paddingLeft: '28px',
-                    paddingRight: '12px',
-                    fontSize: '0.95rem',
-                    fontWeight: 800,
-                    textAlign: 'center',
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: '100%',
+                    opacity: 0,
                     cursor: 'pointer',
-                    color: 'var(--accent-cyan)',
+                    zIndex: 10,
                   }}
-                  value={monthYear}
+                  value={monthYear.startsWith('Tháng') ? new Date().toISOString().slice(0, 7) : monthYear}
                   onChange={(e) => handleMonthYearChange(e.target.value)}
                   onClick={(e) => {
                     try {
@@ -473,7 +481,7 @@ export const TenantCalculatorWizard: React.FC<TenantCalculatorWizardProps> = ({
           <div className="card" style={{ padding: '8px 10px' }}>
             <div className="card-header" style={{ marginBottom: '4px' }}>
               <span className="card-title" style={{ fontSize: '0.8rem' }}>
-                <Droplets size={14} color="#06b6d4" /> Số NƯỚC (Bậc 1: {formatNumber(settings.waterTier1Rate)}đ)
+                <Droplets size={14} color="#06b6d4" /> Số NƯỚC (Bậc 1: {formatNumber(settings.waterTier1Rate)}đ | Bậc 2: {formatNumber(settings.waterTier2Rate)}đ)
               </span>
             </div>
             <div className="input-grid-2">

@@ -104,6 +104,9 @@ export interface PendingDeletionRecord {
   deletedAt: number; // Timestamp (Date.now()) lúc xóa ở local
   tenantName?: string;
   docId?: string;
+  tenantData?: Tenant;
+  billData?: any;
+  singleBillData?: any[];
 }
 
 

@@ -212,26 +212,29 @@ export const CloudBackupModal: React.FC<CloudBackupModalProps> = ({ onClose, onD
   };
 
   // Lọc các bill đơn lẻ trùng lặp nếu đã có bill gộp đại diện
-  const combinedMonthSet = new Set<string>();
+  const combinedKeySet = new Set<string>();
   pendingList.forEach((p) => {
     if (p.type === 'combinedBill') {
-      const raw = p.id.replace(/^combined_/, '');
-      const parts = raw.split('_');
-      if (parts.length >= 2) {
-        const monthKey = `${parts[parts.length - 2]}_${parts[parts.length - 1]}`;
-        combinedMonthSet.add(monthKey.toLowerCase());
-      }
+      const raw = p.id.replace(/^combined_/, '').toLowerCase();
+      combinedKeySet.add(raw);
     }
   });
 
   const displayPendingList = pendingList.filter((p) => {
     if (p.type === 'singleBill') {
-      const raw = p.id.replace(/^single_/, '');
+      const raw = p.id.replace(/^single_/, '').toLowerCase();
       const parts = raw.split('_');
       if (parts.length >= 2) {
-        const monthKey = `${parts[parts.length - 2]}_${parts[parts.length - 1]}`;
-        if (combinedMonthSet.has(monthKey.toLowerCase())) {
-          return false; // Ẩn bill đơn lẻ vì đã có bill gộp đại diện!
+        const monthSuffix = `_${parts[parts.length - 2]}_${parts[parts.length - 1]}`;
+        // Nếu đã có combinedBill chứa đúng monthSuffix và trùng khách thuê -> ẩn singleBill
+        for (const cKey of combinedKeySet) {
+          if (cKey.endsWith(monthSuffix)) {
+            const tenantInC = cKey.replace(monthSuffix, '');
+            const roomPrefix = parts.slice(0, parts.length - 2).join('_');
+            if (tenantInC.length > 0 && (roomPrefix.includes(tenantInC) || tenantInC.includes(roomPrefix))) {
+              return false;
+            }
+          }
         }
       }
     }
@@ -474,22 +477,22 @@ export const CloudBackupModal: React.FC<CloudBackupModalProps> = ({ onClose, onD
 
                       let title = p.id;
                       if (p.type === 'tenant') {
-                        title = `👤 ${resolveTenantDisplayName(p)}`;
+                        title = `👤 Hồ sơ: ${resolveTenantDisplayName(p)}`;
                       } else if (p.type === 'combinedBill') {
                         const raw = p.id.replace(/^combined_/, '');
                         const parts = raw.split('_');
                         const monthStr = parts.length >= 3 ? `${parts[parts.length - 1]}/${parts[parts.length - 2]}` : raw;
                         const tenantName = resolveTenantDisplayName(p);
-                        title = `🧾 ${tenantName !== 'Hồ sơ' ? tenantName : parts[0]} (${monthStr})`;
+                        title = `🧾 Bill: ${tenantName !== 'Hồ sơ' ? tenantName : parts[0]} (${monthStr})`;
                       } else if (p.type === 'singleBill') {
                         const raw = p.id.replace(/^single_/, '');
                         const parts = raw.split('_');
                         if (parts.length >= 3) {
                           const roomStr = parts.slice(0, parts.length - 2).join(' ');
                           const monthStr = `${parts[parts.length - 1]}/${parts[parts.length - 2]}`;
-                          title = `📄 ${roomStr} (${monthStr})`;
+                          title = `📄 Bill lẻ: ${roomStr} (${monthStr})`;
                         } else {
-                          title = `📄 ${raw}`;
+                          title = `📄 Bill lẻ: ${raw}`;
                         }
                       }
 
@@ -501,9 +504,10 @@ export const CloudBackupModal: React.FC<CloudBackupModalProps> = ({ onClose, onD
                             alignItems: 'center',
                             justifyContent: 'space-between',
                             background: 'rgba(0, 0, 0, 0.3)',
-                            padding: '6px 10px',
+                            padding: '5px 8px',
                             borderRadius: 'var(--radius-sm)',
                             fontSize: '0.74rem',
+                            gap: '6px',
                           }}
                         >
                           <span
@@ -513,30 +517,32 @@ export const CloudBackupModal: React.FC<CloudBackupModalProps> = ({ onClose, onD
                               whiteSpace: 'nowrap',
                               overflow: 'hidden',
                               textOverflow: 'ellipsis',
-                              maxWidth: '210px',
+                              flex: 1,
+                              minWidth: 0,
                             }}
                             title={title}
                           >
                             {title}
                           </span>
 
-                          <span
-                            style={{
-                              fontSize: '0.72rem',
-                              fontWeight: 800,
-                              padding: '2px 8px',
-                              borderRadius: '12px',
-                              background: isExpired ? 'rgba(239, 68, 68, 0.2)' : 'rgba(245, 158, 11, 0.2)',
-                              color: isExpired ? '#f87171' : '#fbbf24',
-                              border: `1px solid ${isExpired ? 'rgba(239, 68, 68, 0.4)' : 'rgba(245, 158, 11, 0.4)'}`,
-                              fontFamily: 'monospace',
-                              display: 'flex',
-                              alignItems: 'center',
-                              gap: '4px',
-                            }}
-                          >
-                            {isExpired ? '🔥 Tiêu hủy...' : `⏱️ ${formattedTime}`}
-                          </span>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexShrink: 0 }}>
+                            <span
+                              style={{
+                                fontSize: '0.68rem',
+                                fontWeight: 800,
+                                padding: '2px 6px',
+                                borderRadius: '10px',
+                                background: isExpired ? 'rgba(239, 68, 68, 0.2)' : 'rgba(245, 158, 11, 0.2)',
+                                color: isExpired ? '#f87171' : '#fbbf24',
+                                border: `1px solid ${isExpired ? 'rgba(239, 68, 68, 0.4)' : 'rgba(245, 158, 11, 0.4)'}`,
+                                fontFamily: 'monospace',
+                                whiteSpace: 'nowrap',
+                              }}
+                            >
+                              {isExpired ? '🔥 Hết hạn' : `⏱️ ${formattedTime}`}
+                            </span>
+
+                          </div>
                         </div>
                       );
                     })}

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import type { Settings, BillInput, CalculationResult, Tenant, CombinedBillRecord } from './types/calculator';
 import { getSettings, saveSettingsToStorage, getTenants, getDraftReading, getDefaultBillingMonth } from './utils/calculator';
-import { checkAndAutoRestoreOnLaunch, checkAndAutoBackup24h, subscribeToRealtimeSync, syncSettingsToCloud, reconcileCloudWithLocal } from './services/cloudSyncService';
+import { checkAndAutoRestoreOnLaunch, checkAndAutoBackup24h, subscribeToRealtimeSync, syncSettingsToCloud, reconcileCloudWithLocal, uploadLocalDataToCloud } from './services/cloudSyncService';
 import { MobileSimulator } from './components/MobileSimulator';
 import { BillReceiptModal } from './components/BillReceiptModal';
 import { SettingsModal } from './components/SettingsModal';
@@ -20,7 +20,7 @@ export function App() {
   const [showTenantManager, setShowTenantManager] = useState<boolean>(false);
   const [showCloudBackup, setShowCloudBackup] = useState<boolean>(false);
 
-  const [tenants, setTenants] = useState<Tenant[]>([]);
+  const [tenants, setTenants] = useState<Tenant[]>(getTenants());
   const [selectedTenant, setSelectedTenant] = useState<Tenant | null>(null);
 
   // Track if active receipt modal was opened from History modal
@@ -36,6 +36,23 @@ export function App() {
     monthYear: string;
     roomItems: { roomName: string; input: BillInput; result: CalculationResult }[];
   } | null>(null);
+
+  // LUÔN NẠP DỮ LIỆU LOCAL ĐẦU TIÊN KHI MỞ APP (ĐẢM BẢO HOẠT ĐỘNG 100% OFFLINE KHI MẤT MẠNG)
+  useEffect(() => {
+    const refreshLocalData = () => {
+      const freshTenants = getTenants();
+      setTenants(freshTenants);
+      setSettings(getSettings());
+    };
+    refreshLocalData();
+
+    window.addEventListener('storage', refreshLocalData);
+    window.addEventListener('localDataChanged', refreshLocalData);
+    return () => {
+      window.removeEventListener('storage', refreshLocalData);
+      window.removeEventListener('localDataChanged', refreshLocalData);
+    };
+  }, []);
 
   // ĐĂNG KÝ LẮNG NGHE ĐỒNG BỘ CLOUD THỜI GIAN THỰC (REALTIME ONSNAPSHOT)
   useEffect(() => {
@@ -100,6 +117,18 @@ export function App() {
     return () => clearInterval(interval);
   }, []);
 
+  // LẮNG NGHE SỰ KIỆN KẾT NỐI MẠNG ĐỂ ĐỒNG BỘ NGAY LẬP TỨC
+  useEffect(() => {
+    const handleOnline = () => {
+      // Thiết bị vừa có mạng lại -> Đẩy dữ liệu (kể cả hàng chờ xóa) lên Cloud lập tức
+      uploadLocalDataToCloud().catch(() => null);
+    };
+    window.addEventListener('online', handleOnline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+    };
+  }, []);
+
   const handleSaveSettings = (newSettings: Settings) => {
     setSettings(newSettings);
     saveSettingsToStorage(newSettings);
@@ -123,7 +152,7 @@ export function App() {
         <div className="app-header-title" style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <Calculator color="#3b82f6" size={20} />
           <span>Tính Tiền Trọ</span>
-          <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(59,130,246,0.18)', color: '#60a5fa', fontWeight: 700 }}>v1.5</span>
+          <span style={{ fontSize: '0.68rem', padding: '1px 5px', borderRadius: '4px', background: 'rgba(59,130,246,0.18)', color: '#60a5fa', fontWeight: 700 }}>v2.0</span>
         </div>
         <div className="app-header-actions">
           <button

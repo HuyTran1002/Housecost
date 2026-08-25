@@ -49,6 +49,9 @@ import {
   clearDeletedBillIds,
   removeDeletedBillId,
   getDeletionGracePeriodMs,
+  getRestoredIds,
+  purgeTenantHistory,
+  purgeBillRecordFromLocal,
   type AppDataPackage,
 } from '../utils/calculator';
 import type { PendingDeletionRecord } from '../types/calculator';
@@ -78,13 +81,13 @@ export function parseDeletedAt(deletedAt: any): number {
 // (Lấy từ file .env local hoặc environment variables)
 // ==========================================
 const DEFAULT_FIREBASE_CONFIG = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "",
-  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || ""
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyAPDqUNMVge4ofq_GT-k39iKHuZbut952g",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "tien-tro-4d4a3.firebaseapp.com",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "tien-tro-4d4a3",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "tien-tro-4d4a3.firebasestorage.app",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "832510360310",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:832510360310:web:d45742a17c4b581fd54ad7",
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || "G-W83LHSTBDH"
 };
 
 /**
@@ -283,6 +286,9 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number = 15000): Promise
  * 2.0. ENGINES ĐỐI SOÁT & XÓA DỮ LIỆU THỪA TRÊN CLOUD NẾU KHÔNG KHỚP LOCAL SAU 5 PHÚT (HOẶC 24 GIỜ)
  */
 export async function reconcileCloudWithLocal(): Promise<{ cleanedTenantsCount: number; cleanedBillsCount: number }> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return { cleanedTenantsCount: 0, cleanedBillsCount: 0 };
+  }
   const user = getCurrentUser();
   if (!user) return { cleanedTenantsCount: 0, cleanedBillsCount: 0 };
 
@@ -337,9 +343,22 @@ export async function reconcileCloudWithLocal(): Promise<{ cleanedTenantsCount: 
 
       const graceMs = getGracePeriodMs();
 
+      const isPhantomTenant = tenantName === 'khách thuê' || tenantName === 'khach thue' || docId.endsWith('_Khach_Thue') || tenantId.startsWith('tenant_rec_single_');
+
       // 1. Kiểm tra đối soát Xóa Khách Thuê (Tenant deletion)
       // CHỈ xử lý xóa nếu mốc xóa type === 'tenant' đã thực sự được người dùng bấm Xóa Hồ Sơ
       if (!existsLocally) {
+        if (isPhantomTenant) {
+          try {
+            await withTimeout(deleteDoc(doc(db, 'housecost_tenants', docId)), 10000);
+            cleanedTenantsCount++;
+            console.log(`[Reconcile] Đã tự động dọn dẹp Document ma trên Cloud: (${docId}).`);
+          } catch (delErr) {
+            console.error(`Lỗi dọn doc ma ${docId} trên Firestore:`, delErr);
+          }
+          continue;
+        }
+
         let pending = pendingMap.get(tenantId);
         if (!pending) {
           pending = pendingDeletions.find((p) => p.type === 'tenant' && (p.id === tenantId || p.tenantName?.trim().toLowerCase() === tenantName));
@@ -354,15 +373,25 @@ export async function reconcileCloudWithLocal(): Promise<{ cleanedTenantsCount: 
               await withTimeout(deleteDoc(doc(db, 'housecost_tenants', docId)), 10000);
               cleanedTenantsCount++;
               removePendingDeletion(pending.id);
+              purgeTenantHistory(pending.tenantName, pending.docId || docId, pending.id);
               console.log(`[Reconcile] Đã xóa vĩnh viễn trên Cloud tenant: ${data.tenant.name} (${docId}).`);
             } catch (delErr) {
               console.error(`Lỗi xóa doc ${docId} trên Firestore:`, delErr);
             }
             continue; // Document này đã bị xóa vĩnh viễn khỏi Cloud
           }
+          // Còn trong hạn chờ -> KHÔNG nạp lại vào local (vẫn đang chờ xóa)
         } else {
-          // Nếu không có mốc xóa type === 'tenant' do người dùng xóa -> Nạp lại khách vào local
-          applyTenantSyncData(data as any, false);
+          // Kiểm tra thêm: Nếu Cloud document chính nó có pendingDeletions type=tenant -> ĐỪNG nạp lại
+          const cloudDocPending: any[] = data.pendingDeletions || [];
+          const cloudHasTenantPending = cloudDocPending.some(
+            (cp: any) => cp.type === 'tenant' && (cp.id === tenantId || cp.tenantName?.trim().toLowerCase() === tenantName)
+          );
+          if (!cloudHasTenantPending) {
+            // Không có vết xóa nào -> Nạp lại khách vào local (máy này chưa từng có hồ sơ này)
+            applyTenantSyncData(data as any, false);
+          }
+          // Nếu cloudHasTenantPending = true -> Bỏ qua, không tạo lại "Khách thuê" thừa
         }
       }
 
@@ -376,7 +405,6 @@ export async function reconcileCloudWithLocal(): Promise<{ cleanedTenantsCount: 
 
       // Tập hợp các ID đang thực sự bị xóa ở local (chưa bị bấm Khôi Phục)
       const localPendingList = getPendingDeletions();
-      const localPendingIds = new Set(localPendingList.map((p) => p.id));
       const cloudPendingList: PendingDeletionRecord[] = data.pendingDeletions || [];
 
       const pMap = new Map<string, PendingDeletionRecord>();
@@ -392,23 +420,23 @@ export async function reconcileCloudWithLocal(): Promise<{ cleanedTenantsCount: 
         // 1. Quá hạn chờ -> TIÊU HỦY VĨNH VIỄN mốc xóa này khỏi Cloud & Local!
         if (elapsed >= graceMs) {
           cleanedBillsCount++;
+          if (p.type === 'tenant') {
+            purgeTenantHistory(p.tenantName, p.docId, p.id);
+          } else if (p.type === 'combinedBill' || p.type === 'singleBill') {
+            purgeBillRecordFromLocal(p.id);
+          }
           removePendingDeletion(p.id);
           removeDeletedBillId(p.id);
           return false;
         }
 
-        // 2. Nếu người dùng bấm Khôi Phục (local không còn giữ mốc p.id) -> Loại bỏ mốc xóa khỏi Cloud
-        if (!localPendingIds.has(p.id)) {
-          return false;
-        }
-
         return true;
       });
 
-      // Dọn dẹp combinedHistory đối với các hóa đơn hết hạn chờ (Kiểm tra timestamp cTime > dTime để bảo toàn bill mới tính lại)
+      // Dọn dẹp combinedHistory đối với các hóa đơn đang bị xóa chờ
       combinedHistory = combinedHistory.filter((item: any) => {
         if (!item.id) return true;
-        const pending = pMap.get(item.id);
+        const pending = activePendingDeletions.find((p) => p.id === item.id);
         if (!pending) return true;
 
         const dTime = parseDeletedAt(pending.deletedAt);
@@ -418,23 +446,19 @@ export async function reconcileCloudWithLocal(): Promise<{ cleanedTenantsCount: 
         if (cTime > 0 && dTime > 0 && cTime > dTime) {
           removePendingDeletion(pending.id);
           removeDeletedBillId(pending.id);
-          pMap.delete(item.id);
+          const pIdx = activePendingDeletions.findIndex((p) => p.id === item.id);
+          if (pIdx >= 0) activePendingDeletions.splice(pIdx, 1);
           return true; // GIỮ LẠI HÓA ĐƠN MỚI TÍNH!
         }
 
-        const elapsed = Math.max(0, now - dTime);
-        if (elapsed >= graceMs) {
-          removePendingDeletion(pending.id);
-          removeDeletedBillId(pending.id);
-          return false; // XÓA HẲN HÓA ĐƠN CŨ NÀY KHỎI CLOUD!
-        }
-        return true;
+        // Hóa đơn đang nằm ở hàng chờ xóa -> Loại khỏi active combinedHistory trên Cloud!
+        return false;
       });
 
-      // Dọn dẹp singleHistory đối với các hóa đơn hết hạn chờ (Kiểm tra timestamp cTime > dTime để bảo toàn bill mới tính lại)
+      // Dọn dẹp singleHistory đối với các hóa đơn đang bị xóa chờ
       singleHistory = singleHistory.filter((item: any) => {
         if (!item.id) return true;
-        const pending = pMap.get(item.id);
+        const pending = activePendingDeletions.find((p) => p.id === item.id);
         if (!pending) return true;
 
         const dTime = parseDeletedAt(pending.deletedAt);
@@ -444,17 +468,13 @@ export async function reconcileCloudWithLocal(): Promise<{ cleanedTenantsCount: 
         if (cTime > 0 && dTime > 0 && cTime > dTime) {
           removePendingDeletion(pending.id);
           removeDeletedBillId(pending.id);
-          pMap.delete(item.id);
+          const pIdx = activePendingDeletions.findIndex((p) => p.id === item.id);
+          if (pIdx >= 0) activePendingDeletions.splice(pIdx, 1);
           return true; // GIỮ LẠI HÓA ĐƠN MỚI TÍNH!
         }
 
-        const elapsed = Math.max(0, now - dTime);
-        if (elapsed >= graceMs) {
-          removePendingDeletion(pending.id);
-          removeDeletedBillId(pending.id);
-          return false; // XÓA HẲN HÓA ĐƠN CŨ NÀY KHỎI CLOUD!
-        }
-        return true;
+        // Hóa đơn đang nằm ở hàng chờ xóa -> Loại khỏi active singleHistory trên Cloud!
+        return false;
       });
 
       // Bổ sung vết xóa khách thuê (nếu khách này đang trong hạn chờ xóa)
@@ -492,29 +512,20 @@ export async function reconcileCloudWithLocal(): Promise<{ cleanedTenantsCount: 
       }
     }
 
-    // Dọn các vết pending deletion đã thực sự bị xóa khỏi Cloud Firestore
-    const latestDocs = await withTimeout(getDocs(query(collection(db, 'housecost_tenants'), where('userId', '==', user.uid))), 8000).catch(() => null);
-    if (latestDocs) {
-      const activeCloudTenantIds = new Set<string>();
-      const activeCloudTenantNames = new Set<string>();
-
-      latestDocs.forEach((dSnap) => {
-        const dData = dSnap.data();
-        if (dData && dData.tenant) {
-          activeCloudTenantIds.add(dData.tenant.id);
-          if (dData.tenant.name) activeCloudTenantNames.add(dData.tenant.name.trim().toLowerCase());
-        }
-      });
-
-      getPendingDeletions().forEach((p) => {
+    // Chổi quét rác cuối cùng: Đảm bảo MỌI lệnh xóa (hồ sơ/hóa đơn) đã quá 5 phút đều bị dọn sạch khỏi bộ nhớ máy
+    // (Bảo vệ trường hợp Cloud Document đã bị xóa bởi máy khác khiến vòng lặp ở trên bị bỏ qua)
+    getPendingDeletions().forEach((p) => {
+      const dTime = parseDeletedAt(p.deletedAt);
+      if (dTime > 0 && now - dTime >= getGracePeriodMs()) {
         if (p.type === 'tenant') {
-          const stillOnCloud = activeCloudTenantIds.has(p.id) || (p.tenantName && activeCloudTenantNames.has(p.tenantName.trim().toLowerCase()));
-          if (!stillOnCloud && now - p.deletedAt >= getGracePeriodMs()) {
-            removePendingDeletion(p.id);
-          }
+          purgeTenantHistory(p.tenantName, p.docId, p.id);
+        } else if (p.type === 'combinedBill' || p.type === 'singleBill') {
+          purgeBillRecordFromLocal(p.id);
         }
-      });
-    }
+        removePendingDeletion(p.id);
+        removeDeletedBillId(p.id);
+      }
+    });
   } catch (err) {
     console.error('Lỗi trong đối soát 5p/24h reconcileCloudWithLocal:', err);
   }
@@ -522,7 +533,82 @@ export async function reconcileCloudWithLocal(): Promise<{ cleanedTenantsCount: 
   return { cleanedTenantsCount, cleanedBillsCount };
 }
 
+let isSyncingPendingFlag = false;
+
+export async function syncPendingDeletionsToCloud(): Promise<boolean> {
+  if (isSyncingPendingFlag) return false;
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
+  const user = getCurrentUser();
+  if (!user) return false;
+
+  isSyncingPendingFlag = true;
+  try {
+    const colRef = collection(db, 'housecost_tenants');
+    const q = query(colRef, where('userId', '==', user.uid));
+    const snap = await withTimeout(getDocs(q), 10000).catch(() => null);
+
+    if (!snap) return false;
+
+    const localPendingList = getPendingDeletions();
+    const restoredSet = new Set(getRestoredIds().map((r) => r.trim().toLowerCase()));
+    const updatePromises: Promise<any>[] = [];
+
+    for (const dSnap of snap.docs) {
+      const dData = dSnap.data();
+      if (!dData || !dData.tenant) continue;
+
+      const tId = dData.tenant.id;
+      const tDocId = dSnap.id;
+      const tName = (dData.tenant.name || '').trim().toLowerCase();
+
+      const cloudPending = dData.pendingDeletions || [];
+      const pMap = new Map<string, any>();
+      cloudPending.forEach((p: any) => {
+        if (p.id) pMap.set(p.id, p);
+      });
+
+      localPendingList.forEach((p) => {
+        const isMatch = p.id === tId || (p.docId && tDocId.includes(p.docId)) || (p.tenantName && p.tenantName.trim().toLowerCase() === tName);
+        if (isMatch) {
+          pMap.set(p.id, p);
+        }
+      });
+
+      for (const [pId, pRecord] of Array.from(pMap.entries())) {
+        const pIdLower = pId.trim().toLowerCase();
+        const pDocLower = (pRecord.docId || '').trim().toLowerCase();
+        if (restoredSet.has(pIdLower) || (pDocLower && restoredSet.has(pDocLower))) {
+          pMap.delete(pId);
+        }
+      }
+
+      const updatedPendingArray = Array.from(pMap.values());
+      const currentCloudPendingArray = cloudPending;
+
+      if (JSON.stringify(updatedPendingArray) !== JSON.stringify(currentCloudPendingArray)) {
+        const cleanPayload = sanitizePayload({
+          ...dData,
+          userId: user.uid,
+          userEmail: user.email,
+          pendingDeletions: updatedPendingArray,
+          updatedAt: new Date().toISOString(),
+        });
+        updatePromises.push(withTimeout(setDoc(doc(db, 'housecost_tenants', dSnap.id), cleanPayload), 10000));
+      }
+    }
+
+    await Promise.all(updatePromises);
+    return true;
+  } catch (e) {
+    console.error('Lỗi đẩy đồng bộ mốc xóa lên Cloud:', e);
+    return false;
+  } finally {
+    isSyncingPendingFlag = false;
+  }
+}
+
 export async function syncTenantToCloud(tenantId: string): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) return false;
   const user = getCurrentUser();
   if (!user) {
     console.warn('[Sync Warning] Chưa đăng nhập Firebase User, không thể đồng bộ lên Cloud.');
@@ -530,7 +616,11 @@ export async function syncTenantToCloud(tenantId: string): Promise<boolean> {
   }
 
   const tenantSyncData = getTenantSyncData(tenantId);
-  if (!tenantSyncData) return false;
+  if (!tenantSyncData) {
+    // Nếu khách đã bị xóa ở local -> Đẩy đồng bộ mốc xóa (PendingDeletions) lên Cloud ngay lập tức!
+    syncPendingDeletionsToCloud().catch(() => null);
+    return false;
+  }
 
   const cleanName = getTenantDocId(tenantSyncData.tenant);
   const tenantDocId = `${user.uid}_${cleanName}`;
@@ -694,20 +784,32 @@ export async function syncSettingsToCloud(settings?: any): Promise<boolean> {
 }
 
 export async function uploadLocalDataToCloud(): Promise<{ success: boolean; message: string; updatedAt?: string }> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return { success: false, message: '⚠️ Thiết bị đang ngoại tuyến (Mất mạng kết nối).' };
+  }
   const user = getCurrentUser();
   if (!user) {
     return { success: false, message: '⚠️ Bạn cần Đăng Nhập trước khi tải dữ liệu lên Cloud!' };
   }
 
   const nowIso = new Date().toISOString();
+  isUploadingToCloud = true;
 
   try {
     // 1. Chạy đối soát dọn dẹp các mục thừa trên Cloud nếu đã hết thời gian hạn chờ (5p / 24h)
     const recon = await reconcileCloudWithLocal();
 
-    // 2. Tải toàn bộ khách thuê hiện có ở local lên Cloud
+    // 2. Tải toàn bộ khách thuê hiện có (hoặc đang chờ xóa) ở local lên Cloud
     const tenants = getTenants();
-    const results = await Promise.all(tenants.map((t) => syncTenantToCloud(t.id)));
+    const tenantIds = new Set(tenants.map((t) => t.id));
+    const pendingDeletions = getPendingDeletions();
+    pendingDeletions.forEach((p) => {
+      if (p.type === 'tenant' && p.id) {
+        tenantIds.add(p.id);
+      }
+    });
+
+    const results = await Promise.all(Array.from(tenantIds).map((id) => syncTenantToCloud(id)));
     const successCount = results.filter(Boolean).length;
     await syncSettingsToCloud();
 
@@ -722,14 +824,14 @@ export async function uploadLocalDataToCloud(): Promise<{ success: boolean; mess
       message: `☁️ Đã sao lưu thành công ${successCount}/${tenants.length} file lên Cloud!${extraMsg}`,
     };
   } catch (error: any) {
-    console.error('Lỗi đẩy dữ liệu lên Firestore:', error);
-    return {
-      success: false,
-      message: `❌ Không thể tải dữ liệu lên Cloud: ${error.message || 'Lỗi kết nối Firebase'}`,
-    };
+    console.error('Lỗi tổng khi upload local -> cloud:', error);
+    return { success: false, message: `⚠️ Lỗi sao lưu: ${error.message}` };
+  } finally {
+    isUploadingToCloud = false;
   }
 }
 
+export let isUploadingToCloud = false;
 let isRestoringFromCloud = false;
 
 /**
@@ -741,6 +843,9 @@ export async function downloadDataFromCloud(
   clearBeforeRestore: boolean = false,
   isManualUserAction: boolean = true
 ): Promise<{ success: boolean; message: string; restoredData?: AppDataPackage }> {
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    return { success: false, message: '⚠️ Thiết bị đang ngoại tuyến (Mất mạng kết nối).' };
+  }
   const user = getCurrentUser();
   if (!user) {
     return { success: false, message: '⚠️ Bạn cần Đăng Nhập trước khi khôi phục dữ liệu từ Cloud!' };
@@ -825,13 +930,44 @@ export async function downloadDataFromCloud(
       }
     }
 
-    // 3. Nếu khôi phục thủ công: Gỡ bỏ mảng pendingDeletions trên tất cả các Cloud document đồng loạt
+    // Cảnh báo an toàn: Nếu không tìm thấy dữ liệu nào trên Cloud (hoặc mạng bị ngắt/lỗi), KHÔNG ĐƯỢC XÓA dữ liệu local hiện tại!
+    if (docsMap.size === 0) {
+      return {
+        success: false,
+        message: '⚠️ Không kết nối được với Cloud hoặc không tìm thấy dữ liệu sao lưu nào. Dữ liệu trên máy của bạn (bao gồm hàng chờ xóa) vẫn được giữ nguyên 100%!',
+      };
+    }
+
+    // 3. Nếu khôi phục thủ công VÀ ĐÃ LẤY ĐƯỢC DỮ LIỆU CLOUD THÀNH CÔNG: Gỡ bỏ mảng pendingDeletions trên tất cả các Cloud document đồng loạt
     if (isManualUserAction) {
       clearPendingDeletions();
       clearDeletedBillIds();
 
       const updatePromises: Promise<any>[] = [];
       for (const [docId, data] of docsMap.entries()) {
+        const originalPending = data.pendingDeletions || [];
+        
+        // Tự động khôi phục dữ liệu hóa đơn từ hàng chờ ngược trở lại lịch sử trước khi dọn sạch hàng chờ
+        originalPending.forEach((pCloud: any) => {
+          if (pCloud.type === 'combinedBill' && pCloud.billData) {
+            if (!data.combinedHistory) data.combinedHistory = [];
+            const exists = data.combinedHistory.some((c: any) => c.id === pCloud.billData.id);
+            if (!exists) data.combinedHistory.unshift(pCloud.billData);
+          }
+          if (pCloud.type === 'singleBill' && pCloud.billData) {
+            if (!data.singleHistory) data.singleHistory = [];
+            const exists = data.singleHistory.some((s: any) => s.id === pCloud.billData.id);
+            if (!exists) data.singleHistory.unshift(pCloud.billData);
+          }
+          if (pCloud.singleBillData && Array.isArray(pCloud.singleBillData)) {
+            if (!data.singleHistory) data.singleHistory = [];
+            pCloud.singleBillData.forEach((sData: any) => {
+              const exists = data.singleHistory.some((s: any) => s.id === sData.id);
+              if (!exists) data.singleHistory.unshift(sData);
+            });
+          }
+        });
+
         data.pendingDeletions = [];
         const cleanPayload = sanitizePayload({
           ...data,
@@ -906,7 +1042,7 @@ export function subscribeToRealtimeSync(onDataUpdated: () => void): () => void {
       innerUnsubscribe = onSnapshot(
         q,
         (snap) => {
-          if (isRestoringFromCloud) return; // Nếu đang trong quá trình Khôi Phục Từ Cloud, tạm bỏ qua snapshot Realtime
+          if (isRestoringFromCloud || isUploadingToCloud) return; // Nếu đang tải lên/Khôi Phục Từ Cloud, tạm bỏ qua snapshot Realtime
           let updated = false;
 
           snap.docs.forEach((docSnap) => {
@@ -916,51 +1052,75 @@ export function subscribeToRealtimeSync(onDataUpdated: () => void): () => void {
               const tName = (data.tenant.name || '').trim().toLowerCase();
 
               const cloudPendingDeletions: any[] = data.pendingDeletions || [];
-              const cloudPendingIds = new Set(cloudPendingDeletions.map((cp) => cp.id));
 
               // 1. Tự động nạp hợp nhất thẻ xóa từ Cloud vào Local (bảo toàn mốc thời gian xóa gốc)
+              const cloudPendingIds = new Set(cloudPendingDeletions.map((p) => p.id));
               if (Array.isArray(cloudPendingDeletions) && cloudPendingDeletions.length > 0) {
+                const restoredIds = new Set(getRestoredIds());
+
                 cloudPendingDeletions.forEach((cp: any) => {
                   if (cp.id && cp.type) {
-                    addDeletedBillId(cp.id);
-                    const originalTime = parseDeletedAt(cp.deletedAt);
-                    addPendingDeletion(cp.id, cp.type, cp.tenantName, cp.docId, originalTime);
+                    const cpIdLower = cp.id.trim().toLowerCase();
+                    const isExplicitlyRestored = restoredIds.has(cp.id) || restoredIds.has(cpIdLower);
+
+                    // Chỉ gỡ bỏ/chặn nạp lại nếu người dùng TRÊN MÁY NÀY vừa bấm nút Khôi Phục!
+                    if (!isExplicitlyRestored) {
+                      addDeletedBillId(cp.id);
+                      const originalTime = parseDeletedAt(cp.deletedAt);
+                      addPendingDeletion(cp.id, cp.type, cp.tenantName, cp.docId, originalTime, cp.tenantData, cp.billData, cp.singleBillData);
+                    }
                   }
                 });
               }
 
-              // 2. ĐỒNG BỘ KHÔI PHỤC ĐA THIẾT BỊ REALTIME:
-              // Nếu máy khác vừa bấm nút Khôi Phục (mốc xóa trên Cloud không còn) -> Máy này tự gỡ mốc xóa Local & Khôi phục dữ liệu theo!
-              const currentLocalPending = getPendingDeletions();
-              let isRestoredByOtherDevice = false;
-              const nowMs = Date.now();
-
-              currentLocalPending.forEach((p) => {
-                const dTime = parseDeletedAt(p.deletedAt);
-                const isFreshLocal = dTime > 0 && nowMs - dTime < 8000;
-                if (isFreshLocal) return; // Mốc xóa vừa tạo ở local 8s gần đây -> Đang đẩy Cloud, KHÔNG GỠ!
-
-                const isTenantMatch = p.id === tId || (p.type === 'tenant' && (p.id === tId || p.tenantName?.trim().toLowerCase() === tName));
-                const isBillMatch = (data.combinedHistory || []).some((c: any) => c.id === p.id) || (data.singleHistory || []).some((s: any) => s.id === p.id);
-
-                if ((isTenantMatch || isBillMatch) && !cloudPendingIds.has(p.id)) {
-                  removePendingDeletion(p.id);
-                  removeDeletedBillId(p.id);
-                  isRestoredByOtherDevice = true;
-                }
-              });
+              // 2. Gỡ bỏ mốc xóa Local nếu Cloud đã Hoàn Tác (Cloud mới hơn và không còn chứa mốc xóa đó nữa)
+              const cloudUpdatedAtTime = data.updatedAt ? new Date(data.updatedAt).getTime() : 0;
+              if (cloudUpdatedAtTime > 0) {
+                const localPendingList = getPendingDeletions();
+                localPendingList.forEach((lp) => {
+                  const belongsToThisDoc =
+                    lp.id === tId ||
+                    (lp.docId && docSnap.id.endsWith(`_${lp.docId}`)) ||
+                    (lp.tenantName && lp.tenantName.trim().toLowerCase() === tName);
+                  if (belongsToThisDoc) {
+                    // Nếu Cloud mới hơn Local, VÀ Cloud KHÔNG CÓ mốc xóa này -> Nghĩa là thiết bị khác đã Hoàn tác!
+                    if (cloudUpdatedAtTime > lp.deletedAt && !cloudPendingIds.has(lp.id)) {
+                      removePendingDeletion(lp.id);
+                      removeDeletedBillId(lp.id);
+                    }
+                  }
+                });
+              }
 
               const latestLocalPending = getPendingDeletions().filter((p) => p.type === 'tenant');
               const latestPendingTenantIds = new Set(latestLocalPending.map((p) => p.id));
               const latestPendingTenantNames = new Set(latestLocalPending.map((p) => (p.tenantName || '').trim().toLowerCase()));
 
               const isPendingDelete = latestPendingTenantIds.has(tId) || latestPendingTenantNames.has(tName);
-              if (isPendingDelete) {
-                // Khách này đang trong trạng thái chờ xóa -> Đồng bộ gỡ ngay khỏi danh sách khách hoạt động ở local!
-                deleteTenant(tId, false);
-                updated = true;
-              } else {
-                applyTenantSyncData(data as any, isRestoredByOtherDevice);
+
+              // Kiểm tra thêm: Nếu Cloud document chính nó có pendingDeletions type=tenant -> KHÔNG nạp lại (dù local pending có hay không)
+              const cloudHasTenantTombstone = cloudPendingDeletions.some(
+                (cp: any) => cp.type === 'tenant' && (cp.id === tId || (cp.tenantName || '').trim().toLowerCase() === tName)
+              );
+
+              if (isPendingDelete || cloudHasTenantTombstone) {
+                // Khách này đang trong trạng thái chờ xóa -> CHỈ gỡ khỏi local nếu khách đó thực sự còn đang có trong danh sách local!
+                const currentTenants = getTenants();
+                const isCurrentlyActive = currentTenants.some((t) => t.id === tId || (t.name || '').trim().toLowerCase() === tName);
+                if (isCurrentlyActive) {
+                  deleteTenant(tId, false);
+                  updated = true;
+                }
+              } else if (
+                data.tenant.name &&
+                !data.tenant.name.startsWith('tenant-') &&
+                tName !== 'khách thuê' &&
+                tName !== 'khach thue' &&
+                !docSnap.id.endsWith('_Khach_Thue') &&
+                !tId.startsWith('tenant_rec_single_')
+              ) {
+                // Guard an toàn: Chỉ nạp lại khách thuê nếu có tên hợp lệ (tránh tạo ra 'Khách thuê' ma)
+                applyTenantSyncData(data as any, false);
                 updated = true;
               }
             }
@@ -970,44 +1130,21 @@ export function subscribeToRealtimeSync(onDataUpdated: () => void): () => void {
             }
           });
 
-          // Tự động dọn dẹp local trên thiết bị khác (Web) nếu document tương ứng trên Cloud đã bị xóa vĩnh viễn
-          const cloudDocTenantIds = new Set(
-            snap.docs.map((d) => d.data()?.tenant?.id).filter(Boolean)
-          );
-          const cloudDocTenantNames = new Set(
-            snap.docs.map((d) => (d.data()?.tenant?.name || '').trim().toLowerCase()).filter(Boolean)
-          );
 
-          const localTenants = getTenants();
-          const currentPendingTenants = getPendingDeletions().filter((p) => p.type === 'tenant');
-          const currentPendingTenantIds = new Set(currentPendingTenants.map((p) => p.id));
-          const currentPendingTenantNames = new Set(currentPendingTenants.map((p) => (p.tenantName || '').trim().toLowerCase()));
-
-          const filteredLocalTenants = localTenants.filter((t) => {
-            const tName = (t.name || '').trim().toLowerCase();
-            const existsInCloud = cloudDocTenantIds.has(t.id) || cloudDocTenantNames.has(tName);
-            const isPendingDelete = currentPendingTenantIds.has(t.id) || currentPendingTenantNames.has(tName);
-            return existsInCloud && !isPendingDelete;
-          });
-
-          if (filteredLocalTenants.length !== localTenants.length) {
-            localStorage.setItem('housecost_tenants', JSON.stringify(filteredLocalTenants));
-            updated = true;
-          }
 
           snap.docChanges().forEach((change) => {
             if (change.type === 'removed') {
               const data = change.doc.data();
               if (data && data.tenant && data.tenant.id) {
                 const tId = data.tenant.id;
+                const tName = data.tenant.name;
+                const tDocId = change.doc.id;
                 deleteTenant(tId, false);
+                purgeTenantHistory(tName, tDocId, tId);
                 updated = true;
               }
             }
           });
-
-          // Tự động kiểm tra đối soát 5p/24h mỗi khi có snapshot mới
-          reconcileCloudWithLocal();
 
           if (updated) {
             onDataUpdated();

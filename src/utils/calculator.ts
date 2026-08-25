@@ -1,4 +1,4 @@
-import type { BillInput, CalculationResult, Settings, BillRecord, CombinedBillRecord, Tenant, DraftReading, TenantSyncData, PendingDeletionRecord } from '../types/calculator';
+import type { BillInput, CalculationResult, Settings, BillRecord, CombinedBillRecord, Tenant, TenantRoom, DraftReading, TenantSyncData, PendingDeletionRecord } from '../types/calculator';
 
 export const SETTINGS_KEY = 'housecost_settings';
 export const HISTORY_KEY = 'housecost_history';
@@ -432,7 +432,17 @@ export function getBillHistory(): BillRecord[] {
   try {
     const saved = localStorage.getItem(HISTORY_KEY);
     if (saved) {
-      return JSON.parse(saved);
+      const records: BillRecord[] = JSON.parse(saved);
+      const pendingDeletions = getPendingDeletions();
+      const deletedBillIds = new Set(getDeletedBillIds());
+
+      const pendingIds = new Set(pendingDeletions.map((p) => p.id));
+
+      return records.filter((rec) => {
+        if (!rec || !rec.id) return false;
+        if (deletedBillIds.has(rec.id) || pendingIds.has(rec.id)) return false;
+        return true;
+      });
     }
   } catch (e) {
     console.error('Lỗi đọc lịch sử:', e);
@@ -483,6 +493,16 @@ export function saveBillRecord(input: BillInput, result: CalculationResult, sett
   return newRecord;
 }
 
+function triggerAutoCloudPendingSync(): void {
+  if (typeof window !== 'undefined' && typeof navigator !== 'undefined' && navigator.onLine) {
+    setTimeout(() => {
+      import('../services/cloudSyncService').then((m) => {
+        m.syncPendingDeletionsToCloud().catch(() => null);
+      });
+    }, 150);
+  }
+}
+
 export function deleteBillRecord(id: string): BillRecord[] {
   const history = getBillHistory();
   const targetRecord = history.find((item) => item.id === id);
@@ -491,7 +511,8 @@ export function deleteBillRecord(id: string): BillRecord[] {
   try {
     localStorage.setItem(HISTORY_KEY, JSON.stringify(updatedHistory));
     addDeletedBillId(id);
-    addPendingDeletion(id, 'singleBill', targetRecord?.input?.roomName);
+    addPendingDeletion(id, 'singleBill', targetRecord?.input?.roomName, undefined, undefined, undefined, targetRecord);
+    triggerAutoCloudPendingSync();
 
     // Nếu xóa hóa đơn phòng đơn lẻ -> Tự động loại bỏ phòng đó khỏi Hóa Đơn Gộp tương ứng (nếu có)
     if (targetRecord && targetRecord.input) {
@@ -515,7 +536,7 @@ export function deleteBillRecord(id: string): BillRecord[] {
             if (newItems.length === 0) {
               // Hóa đơn gộp không còn phòng nào -> Xóa luôn Hóa đơn gộp
               addDeletedBillId(cRecord.id);
-              addPendingDeletion(cRecord.id, 'combinedBill', cRecord.tenantName);
+              addPendingDeletion(cRecord.id, 'combinedBill', cRecord.tenantName, undefined, undefined, undefined, cRecord);
               return false;
             } else {
               // Cập nhật lại phòng còn lại và tổng tiền mới
@@ -542,7 +563,25 @@ export function getCombinedBillHistory(): CombinedBillRecord[] {
   try {
     const saved = localStorage.getItem(COMBINED_HISTORY_KEY);
     if (saved) {
-      return JSON.parse(saved);
+      const records: CombinedBillRecord[] = JSON.parse(saved);
+      const pendingDeletions = getPendingDeletions();
+      const deletedBillIds = new Set(getDeletedBillIds());
+
+      const pendingIds = new Set(pendingDeletions.map((p) => p.id));
+      const pendingTenantNames = new Set(
+        pendingDeletions
+          .filter((p) => p.type === 'tenant')
+          .map((p) => (p.tenantName || '').trim().toLowerCase())
+          .filter(Boolean)
+      );
+
+      return records.filter((rec) => {
+        if (!rec || !rec.id) return false;
+        if (deletedBillIds.has(rec.id) || pendingIds.has(rec.id)) return false;
+        const tenantNameLower = (rec.tenantName || '').trim().toLowerCase();
+        if (pendingTenantNames.has(tenantNameLower)) return false;
+        return true;
+      });
     }
   } catch (e) {
     console.error('Lỗi đọc lịch sử hóa đơn gộp:', e);
@@ -611,7 +650,17 @@ const DELETED_BILL_IDS_KEY = 'housecost_deleted_bill_ids';
 export function getDeletedBillIds(): string[] {
   try {
     const data = localStorage.getItem(DELETED_BILL_IDS_KEY);
-    return data ? JSON.parse(data) : [];
+    const rawList: string[] = data ? JSON.parse(data) : [];
+    const restoredSet = new Set(getRestoredIds().map((r) => r.trim().toLowerCase()));
+
+    return rawList.filter((id) => {
+      const lower = id.trim().toLowerCase();
+      if (restoredSet.has(lower)) return false;
+      for (const r of restoredSet) {
+        if (r.length >= 3 && (lower.includes(r) || r.includes(lower))) return false;
+      }
+      return true;
+    });
   } catch (e) {
     return [];
   }
@@ -647,9 +696,27 @@ export function addPendingDeletion(
   type: 'tenant' | 'combinedBill' | 'singleBill',
   tenantName?: string,
   docId?: string,
-  deletedAt?: number
+  deletedAt?: number,
+  tenantData?: Tenant,
+  billData?: any,
+  singleBillData?: any[]
 ): PendingDeletionRecord[] {
   try {
+    const restoredIds = getRestoredIds();
+    const rawId = (id || '').trim().toLowerCase();
+    const rawDocId = (docId || '').trim().toLowerCase();
+
+    // CẢNH BÁO AN TOÀN: Chỉ chặn nếu ĐÚNG ID hoặc DocID này vừa được bấm Hoàn Tác/Khôi phục
+    const isBlocked = restoredIds.some((rId) => {
+      const rLower = rId.trim().toLowerCase();
+      if (rLower === rawId || (rawDocId && rLower === rawDocId)) return true;
+      return false;
+    });
+
+    if (isBlocked) {
+      return getPendingDeletions();
+    }
+
     let resolvedTenantName = tenantName;
     if (type === 'tenant') {
       if (!resolvedTenantName || resolvedTenantName.startsWith('tenant-')) {
@@ -684,12 +751,19 @@ export function addPendingDeletion(
       }
     }
 
+    const finalTenantData = tenantData || (existing ? existing.tenantData : undefined);
+    const finalBillData = billData || (existing ? existing.billData : undefined);
+    const finalSingleBillData = singleBillData || (existing ? existing.singleBillData : undefined);
+
     const newRecord: PendingDeletionRecord = {
       id,
       type,
       deletedAt: deletedAt || (existing && existing.deletedAt ? existing.deletedAt : Date.now()),
       tenantName: finalTenantName,
       docId: finalDocId,
+      tenantData: finalTenantData,
+      billData: finalBillData,
+      singleBillData: finalSingleBillData,
     };
     if (existingIndex >= 0) {
       list[existingIndex] = newRecord;
@@ -705,6 +779,7 @@ export function addPendingDeletion(
 
 export function removePendingDeletion(id: string): PendingDeletionRecord[] {
   try {
+    const rawId = (id || '').trim().toLowerCase();
     let monthSuffix = '';
     if (id.startsWith('combined_')) {
       const raw = id.replace(/^combined_/, '');
@@ -715,8 +790,17 @@ export function removePendingDeletion(id: string): PendingDeletionRecord[] {
     }
 
     const list = getPendingDeletions().filter((item) => {
-      if (item.id === id || item.docId === id) return false;
+      const itemId = (item.id || '').trim().toLowerCase();
+      const itemDocId = (item.docId || '').trim().toLowerCase();
+
+      // 1. Khớp chính xác ID hoặc DocId
+      if (itemId === rawId || itemDocId === rawId) return false;
+      if (rawId && itemId && (rawId.includes(itemId) || itemId.includes(rawId))) return false;
+      if (rawId && itemDocId && (rawId.includes(itemDocId) || itemDocId.includes(rawId))) return false;
+
+      // 2. Nếu xóa hóa đơn gộp -> xóa kèm các hóa đơn phòng đơn lẻ thuộc hóa đơn gộp đó
       if (monthSuffix && item.type === 'singleBill' && item.id.endsWith(monthSuffix)) return false;
+
       return true;
     });
 
@@ -727,10 +811,265 @@ export function removePendingDeletion(id: string): PendingDeletionRecord[] {
   }
 }
 
+export function purgeTenantHistory(tenantName?: string, docId?: string, tenantId?: string): void {
+  try {
+    const nameLower = (tenantName || '').trim().toLowerCase();
+    const docLower = (docId || '').trim().toLowerCase();
+    const idLower = (tenantId || '').trim().toLowerCase();
+
+    if (!nameLower && !docLower && !idLower) return;
+
+    // 1. Dọn dẹp trực tiếp dữ liệu thô Combined History từ localStorage
+    const rawCombined = localStorage.getItem(COMBINED_HISTORY_KEY);
+    if (rawCombined) {
+      const combinedHistory: CombinedBillRecord[] = JSON.parse(rawCombined);
+      const updatedCombined = combinedHistory.filter((c) => {
+        const cTenant = (c.tenantName || '').trim().toLowerCase();
+        const cDoc = getTenantDocId({ name: c.tenantName || '', id: '' }).toLowerCase();
+
+        if (nameLower && cTenant === nameLower) return false;
+        if (docLower && (cDoc === docLower || cDoc.includes(docLower) || docLower.includes(cDoc))) return false;
+        return true;
+      });
+      localStorage.setItem(COMBINED_HISTORY_KEY, JSON.stringify(updatedCombined));
+    }
+
+    // 2. Dọn dẹp trực tiếp dữ liệu thô Single History từ localStorage
+    const rawSingle = localStorage.getItem(HISTORY_KEY);
+    if (rawSingle) {
+      const singleHistory: BillRecord[] = JSON.parse(rawSingle);
+      const updatedSingle = singleHistory.filter((s) => {
+        if (idLower && s.id && s.id.toLowerCase().includes(idLower)) return false;
+        return true;
+      });
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(updatedSingle));
+    }
+
+    // 3. Đảm bảo TENANTS_KEY cũng được dọn sạch hoàn toàn khỏi dữ liệu thô
+    const rawTenants = localStorage.getItem(TENANTS_KEY);
+    if (rawTenants) {
+      const tenantsList: Tenant[] = JSON.parse(rawTenants);
+      const updatedTenants = tenantsList.filter((t) => {
+        const tName = (t.name || '').trim().toLowerCase();
+        const tDoc = getTenantDocId(t).toLowerCase();
+        if (idLower && t.id.toLowerCase() === idLower) return false;
+        if (nameLower && tName === nameLower) return false;
+        if (docLower && (tDoc === docLower || tDoc.includes(docLower) || docLower.includes(tDoc))) return false;
+        return true;
+      });
+      localStorage.setItem(TENANTS_KEY, JSON.stringify(updatedTenants));
+    }
+
+    if (typeof window !== 'undefined') window.dispatchEvent(new Event('localDataChanged'));
+  } catch (e) {
+    console.error('Lỗi dọn sạch lịch sử khách thuê:', e);
+  }
+}
+
+export function purgeBillRecordFromLocal(billId: string): void {
+  try {
+    if (!billId) return;
+    const rawId = billId.trim().toLowerCase();
+
+    // 1. Purge from raw Combined History
+    const rawCombined = localStorage.getItem(COMBINED_HISTORY_KEY);
+    if (rawCombined) {
+      const combinedHistory: CombinedBillRecord[] = JSON.parse(rawCombined);
+      const updatedCombined = combinedHistory.filter((c) => (c.id || '').trim().toLowerCase() !== rawId);
+      localStorage.setItem(COMBINED_HISTORY_KEY, JSON.stringify(updatedCombined));
+    }
+
+    // 2. Purge from raw Single History
+    const rawSingle = localStorage.getItem(HISTORY_KEY);
+    if (rawSingle) {
+      const singleHistory: BillRecord[] = JSON.parse(rawSingle);
+      const updatedSingle = singleHistory.filter((s) => (s.id || '').trim().toLowerCase() !== rawId);
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(updatedSingle));
+    }
+
+    if (typeof window !== 'undefined') window.dispatchEvent(new Event('localDataChanged'));
+  } catch (e) {
+    console.error('Lỗi dọn sạch hóa đơn khỏi local:', e);
+  }
+}
+
 export function clearPendingDeletions(): void {
   try {
     localStorage.removeItem(PENDING_DELETIONS_KEY);
   } catch (e) {}
+}
+
+export const RESTORED_IDS_KEY = 'housecost_restored_ids';
+
+export function getRestoredIds(): string[] {
+  try {
+    const data = localStorage.getItem(RESTORED_IDS_KEY);
+    return data ? JSON.parse(data) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+export function addRestoredId(id: string): void {
+  try {
+    const list = getRestoredIds();
+    if (!list.includes(id)) {
+      list.push(id);
+      localStorage.setItem(RESTORED_IDS_KEY, JSON.stringify(list));
+    }
+  } catch (e) {}
+}
+
+export function removeRestoredId(id: string): void {
+  try {
+    const rawId = (id || '').trim().toLowerCase();
+    if (!rawId) return;
+    const list = getRestoredIds().filter((item) => {
+      const itemLower = (item || '').trim().toLowerCase();
+      if (itemLower === rawId) return false;
+      if (rawId.length >= 3 && itemLower.length >= 3 && (rawId.includes(itemLower) || itemLower.includes(rawId))) return false;
+      return true;
+    });
+    localStorage.setItem(RESTORED_IDS_KEY, JSON.stringify(list));
+  } catch (e) {}
+}
+
+export function clearRestoredIds(): void {
+  try {
+    localStorage.removeItem(RESTORED_IDS_KEY);
+  } catch (e) {}
+}
+
+export function undoPendingDeletion(id: string): void {
+  try {
+    const rawId = (id || '').trim().toLowerCase();
+    const pendingList = getPendingDeletions();
+    const targetPending = pendingList.find((p) => {
+      const pId = (p.id || '').trim().toLowerCase();
+      const pDocId = (p.docId || '').trim().toLowerCase();
+      return pId === rawId || pDocId === rawId || (rawId && pId.includes(rawId)) || (rawId && pDocId.includes(rawId));
+    });
+
+    // 1. Thêm chỉ định danh ID/DocID cụ thể vào Restored IDs
+    if (targetPending) {
+      if (targetPending.id) addRestoredId(targetPending.id);
+      if (targetPending.docId) addRestoredId(targetPending.docId);
+    }
+    addRestoredId(id);
+
+    // 2. Gỡ chỉ mục này khỏi mảng pendingDeletions & deletedBillIds ở local
+    removePendingDeletion(id);
+    if (targetPending) {
+      if (targetPending.id) {
+        removePendingDeletion(targetPending.id);
+        removeDeletedBillId(targetPending.id);
+      }
+      if (targetPending.docId) {
+        removePendingDeletion(targetPending.docId);
+        removeDeletedBillId(targetPending.docId);
+      }
+    }
+    removeDeletedBillId(id);
+
+    // 3. NẾU HOÀN TÁC HÓA ĐƠN GỘP HOẶC ĐƠN LẺ: Phục hồi duy nhất Hóa Đơn đó vào history
+    if (targetPending && (targetPending.type === 'combinedBill' || targetPending.type === 'singleBill' || id.startsWith('combined_') || id.startsWith('single_') || id.startsWith('bill_'))) {
+      // 3.1 Nạp lại Hóa đơn gộp vào COMBINED_HISTORY_KEY
+      if (targetPending.billData && (targetPending.type === 'combinedBill' || targetPending.billData.grandTotal !== undefined)) {
+        const rawCombined = localStorage.getItem(COMBINED_HISTORY_KEY);
+        let currentCombined: CombinedBillRecord[] = rawCombined ? JSON.parse(rawCombined) : [];
+        const exists = currentCombined.some((c) => c.id === targetPending.billData.id);
+        if (!exists) {
+          currentCombined.unshift(targetPending.billData);
+          localStorage.setItem(COMBINED_HISTORY_KEY, JSON.stringify(currentCombined));
+        }
+      }
+
+      // 3.2 Nạp lại Hóa đơn đơn lẻ vào HISTORY_KEY
+      if (targetPending.billData && (targetPending.type === 'singleBill' || targetPending.billData.input)) {
+        const rawSingle = localStorage.getItem(HISTORY_KEY);
+        let currentSingle: BillRecord[] = rawSingle ? JSON.parse(rawSingle) : [];
+        const exists = currentSingle.some((s) => s.id === targetPending.billData.id);
+        if (!exists) {
+          currentSingle.unshift(targetPending.billData);
+          localStorage.setItem(HISTORY_KEY, JSON.stringify(currentSingle));
+        }
+      }
+
+      // 3.3 Nếu có danh sách singleBillData kèm theo (hóa đơn phòng đơn của bill gộp)
+      if (Array.isArray(targetPending.singleBillData) && targetPending.singleBillData.length > 0) {
+        const rawSingle = localStorage.getItem(HISTORY_KEY);
+        let currentSingle: BillRecord[] = rawSingle ? JSON.parse(rawSingle) : [];
+        targetPending.singleBillData.forEach((sRec) => {
+          if (!currentSingle.some((s) => s.id === sRec.id)) {
+            currentSingle.unshift(sRec);
+          }
+          if (sRec.id) {
+            removePendingDeletion(sRec.id);
+            removeDeletedBillId(sRec.id);
+            addRestoredId(sRec.id);
+          }
+        });
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(currentSingle));
+      }
+
+      // 3.4 Nếu là combinedBill -> dọn sạch luôn các mốc singleBill theo monthSuffix
+      if (targetPending.type === 'combinedBill' || id.startsWith('combined_')) {
+        const rawCombinedId = targetPending.id || id;
+        const raw = rawCombinedId.replace(/^combined_/, '');
+        const parts = raw.split('_');
+        if (parts.length >= 2) {
+          const monthSuffix = `_${parts[parts.length - 2]}_${parts[parts.length - 1]}`;
+          getPendingDeletions().forEach((p) => {
+            if (p.type === 'singleBill' && p.id.endsWith(monthSuffix)) {
+              removePendingDeletion(p.id);
+              removeDeletedBillId(p.id);
+              if (p.id) addRestoredId(p.id);
+            }
+          });
+        }
+      }
+    }
+
+    // 4. NẾU HOÀN TÁC KHÁCH THUÊ: Chỉ phục hồi Hồ sơ khách thuê vào housecost_tenants (Không đụng đến bill)
+    if (targetPending && (targetPending.type === 'tenant' || id.startsWith('tenant-'))) {
+      const rawSavedTenants = localStorage.getItem(TENANTS_KEY);
+      let currentTenants: Tenant[] = rawSavedTenants ? JSON.parse(rawSavedTenants) : [];
+      const targetNameLower = (targetPending.tenantName || '').trim().toLowerCase();
+
+      const existingIndex = currentTenants.findIndex((t) => {
+        if (t.id === id || (targetPending.id && t.id === targetPending.id)) return true;
+        if (targetNameLower && (t.name || '').trim().toLowerCase() === targetNameLower) return true;
+        return false;
+      });
+
+      if (existingIndex < 0) {
+        let restoredTenant: Tenant | undefined = targetPending.tenantData;
+
+        if (!restoredTenant) {
+          const tenantName = targetPending.tenantName || 'Khách thuê';
+          const tId = targetPending.id && targetPending.id.startsWith('tenant-') ? targetPending.id : (id.startsWith('tenant-') ? id : `tenant-${Date.now()}`);
+          const combined = getCombinedBillHistory();
+          const foundC = combined.find((c) => (c.tenantName || '').trim().toLowerCase() === targetNameLower);
+          const rooms = foundC && foundC.roomItems ? foundC.roomItems.map((r) => ({ roomName: r.roomName, defaultRent: r.result?.rentAmount || 0 })) : [{ roomName: 'Phòng 101', defaultRent: 0 }];
+
+          restoredTenant = {
+            id: tId,
+            name: tenantName,
+            rooms,
+          };
+        }
+
+        currentTenants.push(restoredTenant);
+        localStorage.setItem(TENANTS_KEY, JSON.stringify(currentTenants));
+        if (typeof window !== 'undefined') window.dispatchEvent(new Event('localDataChanged'));
+      }
+    }
+
+    getTenants(); // Trigger auto-recovery
+    triggerAutoCloudPendingSync();
+  } catch (e) {
+    console.error('Lỗi hoàn tác xóa:', e);
+  }
 }
 
 export function deleteCombinedBillRecord(id: string): CombinedBillRecord[] {
@@ -739,14 +1078,10 @@ export function deleteCombinedBillRecord(id: string): CombinedBillRecord[] {
   const tenantName = targetRecord?.tenantName;
   const docId = tenantName ? getTenantDocId({ name: tenantName, id: '' }) : undefined;
 
+  removeRestoredId(id);
+
+  let deletedSingles: BillRecord[] = [];
   const updatedCombined = combinedList.filter((item) => item.id !== id);
-  try {
-    localStorage.setItem(COMBINED_HISTORY_KEY, JSON.stringify(updatedCombined));
-    addDeletedBillId(id);
-    addPendingDeletion(id, 'combinedBill', tenantName, docId);
-  } catch (e) {
-    console.error('Lỗi xóa lịch sử hóa đơn gộp:', e);
-  }
 
   // Xóa đồng bộ các bản ghi phòng đơn lẻ VÀ SỐ TẠM tương ứng
   if (targetRecord && Array.isArray(targetRecord.roomItems)) {
@@ -754,14 +1089,13 @@ export function deleteCombinedBillRecord(id: string): CombinedBillRecord[] {
     const roomNamesToDelete = targetRecord.roomItems.map((r) => (r.roomName || '').trim().toLowerCase());
     const normMonthToDelete = (monthToDelete || '').trim().toLowerCase();
 
-    // 1. Xóa sạch các bản ghi số tạm nháp của các phòng trong tháng này VÀ bổ sung mốc xóa cho phòng đơn lẻ
+    // 1. Xóa sạch các bản ghi số tạm nháp của các phòng trong tháng này
     const cleanMonth = normalizeMonthKey(monthToDelete).toLowerCase().replace(/[^a-z0-9]/g, '_');
     targetRecord.roomItems.forEach((r) => {
       deleteDraftReading(r.roomName, monthToDelete);
       const rKey = (r.roomName || '').trim().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '_');
       const singleId = `single_${rKey}_${cleanMonth}`;
       addDeletedBillId(singleId);
-      addPendingDeletion(singleId, 'singleBill');
     });
 
     // 2. Xóa các hóa đơn phòng đơn tương ứng
@@ -772,8 +1106,8 @@ export function deleteCombinedBillRecord(id: string): CombinedBillRecord[] {
       const matchRoom = roomNamesToDelete.includes(recRoom);
       const matchMonth = recMonth === normMonthToDelete || normalizeMonthKey(recMonth).toLowerCase() === normalizeMonthKey(normMonthToDelete).toLowerCase();
       if (matchRoom && matchMonth) {
+        deletedSingles.push(rec);
         addDeletedBillId(rec.id);
-        addPendingDeletion(rec.id, 'singleBill');
       }
       return !(matchRoom && matchMonth);
     });
@@ -785,6 +1119,15 @@ export function deleteCombinedBillRecord(id: string): CombinedBillRecord[] {
     }
   }
 
+  try {
+    localStorage.setItem(COMBINED_HISTORY_KEY, JSON.stringify(updatedCombined));
+    addDeletedBillId(id);
+    addPendingDeletion(id, 'combinedBill', tenantName, docId, undefined, undefined, targetRecord, deletedSingles);
+  } catch (e) {
+    console.error('Lỗi xóa lịch sử hóa đơn gộp:', e);
+  }
+
+  triggerAutoCloudPendingSync();
   return updatedCombined;
 }
 
@@ -807,6 +1150,7 @@ export function clearAllLocalAppData(): void {
     localStorage.removeItem(SETTINGS_KEY);
     localStorage.removeItem(DELETED_BILL_IDS_KEY);
     localStorage.removeItem(PENDING_DELETIONS_KEY);
+    localStorage.removeItem(RESTORED_IDS_KEY);
     localStorage.removeItem('housecost_last_24h_auto_backup');
     localStorage.removeItem('housecost_auto_restored_user');
   } catch (e) {
@@ -816,15 +1160,86 @@ export function clearAllLocalAppData(): void {
 
 // KHÁCH THUÊ (Tenants)
 export function getTenants(): Tenant[] {
+  let tenants: Tenant[] = [];
   try {
     const saved = localStorage.getItem(TENANTS_KEY);
     if (saved) {
-      return JSON.parse(saved);
+      tenants = JSON.parse(saved);
     }
   } catch (e) {
     console.error('Lỗi đọc khách thuê:', e);
   }
-  return [];
+
+  const pendingDeletions = getPendingDeletions();
+  const pendingTenantNames = new Set<string>();
+  const pendingTenantIds = new Set<string>();
+  const pendingDocIds = new Set<string>();
+
+  pendingDeletions.forEach((p) => {
+    if (p.type === 'tenant' || (p.id && p.id.startsWith('tenant-'))) {
+      if (p.id) pendingTenantIds.add(p.id);
+      if (p.tenantName) pendingTenantNames.add(p.tenantName.trim().toLowerCase());
+      if (p.docId) pendingDocIds.add(p.docId.trim().toLowerCase());
+    }
+  });
+
+  // Lọc bỏ 100% tất cả các khách thuê đang nằm trong mốc xóa pendingDeletions
+  tenants = tenants.filter((t) => {
+    if (!t || !t.id) return false;
+    const tName = (t.name || '').trim().toLowerCase();
+    const tDoc = getTenantDocId(t).toLowerCase();
+
+    if (pendingTenantIds.has(t.id)) return false;
+    if (tName && pendingTenantNames.has(tName)) return false;
+    if (tDoc && (pendingDocIds.has(tDoc) || pendingDocIds.has(t.id.toLowerCase()))) return false;
+    return true;
+  });
+
+  // TỰ ĐỘNG KHÔI PHỤC HỒ SƠ KHÁCH THUÊ TỪ LỊCH SỬ HÓA ĐƠN NẾU HỒ SƠ BỊ RỖNG HOẶC THIẾU
+  try {
+    const existingTenantNames = new Set(tenants.map((t) => (t.name || '').trim().toLowerCase()));
+    let recovered = false;
+
+    // Phục hồi từ Lịch sử Hóa đơn gộp (Combined History) đối với hồ sơ khách thuê hợp lệ chưa từng bị xóa
+    const combinedHistory = getCombinedBillHistory();
+    combinedHistory.forEach((record) => {
+      const name = (record.tenantName || '').trim();
+      const lowerName = name.toLowerCase();
+      const docId = getTenantDocId({ name, id: '' }).toLowerCase();
+
+      if (
+        name &&
+        lowerName !== 'khách thuê' &&
+        lowerName !== 'khach thue' &&
+        !existingTenantNames.has(lowerName) &&
+        !pendingTenantNames.has(lowerName) &&
+        !pendingDocIds.has(docId)
+      ) {
+        const rooms: TenantRoom[] = (record.roomItems || []).map((r) => ({
+          roomName: r.roomName,
+          defaultRent: r.input?.rentAmount || 0,
+        }));
+        if (rooms.length > 0) {
+          const newTenant: Tenant = {
+            id: `tenant_rec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            name,
+            rooms,
+          };
+          tenants.push(newTenant);
+          existingTenantNames.add(lowerName);
+          recovered = true;
+        }
+      }
+    });
+
+    if (recovered) {
+      localStorage.setItem(TENANTS_KEY, JSON.stringify(tenants));
+    }
+  } catch (err) {
+    console.error('Lỗi tự động phục hồi khách thuê từ lịch sử:', err);
+  }
+
+  return tenants;
 }
 
 export function saveTenant(tenant: Tenant): Tenant[] {
@@ -839,6 +1254,7 @@ export function saveTenant(tenant: Tenant): Tenant[] {
     localStorage.setItem(TENANTS_KEY, JSON.stringify(tenants));
     // Nếu lưu lại tenant trùng id/tên, xóa khỏi pending deletion nếu có
     removePendingDeletion(tenant.id);
+    if (typeof window !== 'undefined') window.dispatchEvent(new Event('localDataChanged'));
   } catch (e) {
     console.error('Lỗi lưu khách thuê:', e);
   }
@@ -851,12 +1267,19 @@ export function deleteTenant(id: string, createPending: boolean = true): Tenant[
   const updated = tenants.filter((t) => t.id !== id);
   try {
     localStorage.setItem(TENANTS_KEY, JSON.stringify(updated));
+    if (typeof window !== 'undefined') window.dispatchEvent(new Event('localDataChanged'));
+    if (targetTenant) {
+      removeRestoredId(id);
+      if (targetTenant.name) removeRestoredId(targetTenant.name);
+      removeRestoredId(getTenantDocId(targetTenant));
+    }
     if (createPending) {
       const existingPending = getPendingDeletions().find((p) => p.id === id || (p.docId && p.docId.includes(id)));
       const resolvedName = targetTenant?.name || existingPending?.tenantName;
       const docId = targetTenant ? getTenantDocId(targetTenant) : (existingPending?.docId || id);
-      addPendingDeletion(id, 'tenant', resolvedName, docId);
+      addPendingDeletion(id, 'tenant', resolvedName, docId, undefined, targetTenant);
     }
+    triggerAutoCloudPendingSync();
   } catch (e) {
     console.error('Lỗi xóa khách thuê:', e);
   }
@@ -924,7 +1347,16 @@ export function getTenantDocId(tenant: Tenant | { name: string; id: string }): s
 
 export function getTenantSyncData(tenantId: string): TenantSyncData | null {
   const tenants = getTenants();
-  const tenant = tenants.find((t) => t.id === tenantId);
+  let tenant = tenants.find((t) => t.id === tenantId);
+
+  // Nếu khách thuê đã bị xóa (đang trong hàng chờ), lấy dữ liệu từ hàng chờ
+  if (!tenant) {
+    const pending = getPendingDeletions().find(p => p.type === 'tenant' && p.id === tenantId);
+    if (pending && pending.tenantData) {
+      tenant = pending.tenantData;
+    }
+  }
+
   if (!tenant) return null;
 
   const roomNames = (tenant.rooms || []).map((r) => r.roomName.trim().toLowerCase());
@@ -959,6 +1391,17 @@ export function getTenantSyncData(tenantId: string): TenantSyncData | null {
 
 export function applyTenantSyncData(syncData: TenantSyncData, isManualRestore: boolean = false): void {
   if (!syncData || !syncData.tenant || !syncData.tenant.id) return;
+  // Guard an toàn: Không nạp dữ liệu nếu tên khách thuê không hợp lệ (rỗng, ID tự sinh, hoặc tên ma 'Khách Thuê')
+  const tenantNameRaw = (syncData.tenant.name || '').trim().toLowerCase();
+  if (
+    !tenantNameRaw ||
+    tenantNameRaw.startsWith('tenant-') ||
+    tenantNameRaw === 'khách thuê' ||
+    tenantNameRaw === 'khach thue' ||
+    syncData.tenant.id.startsWith('tenant_rec_single_')
+  ) {
+    return;
+  }
 
   // Nếu người dùng chủ động bấm Khôi Phục Từ Cloud -> Hủy bỏ hoàn toàn các vết xóa chờ
   if (isManualRestore) {
@@ -969,7 +1412,7 @@ export function applyTenantSyncData(syncData: TenantSyncData, isManualRestore: b
     // Nạp đồng bộ các vết xóa chờ (pendingDeletions) từ Cloud sang local để các máy cùng nhận diện
     if (Array.isArray(syncData.pendingDeletions) && syncData.pendingDeletions.length > 0) {
       syncData.pendingDeletions.forEach((pCloud) => {
-        addPendingDeletion(pCloud.id, pCloud.type, pCloud.tenantName, pCloud.docId);
+        addPendingDeletion(pCloud.id, pCloud.type, pCloud.tenantName, pCloud.docId, pCloud.deletedAt, pCloud.tenantData, pCloud.billData, pCloud.singleBillData);
       });
     }
   }
@@ -1121,6 +1564,7 @@ export function applyTenantSyncData(syncData: TenantSyncData, isManualRestore: b
 
   const nonTenantCombined = localCombined.filter((c) => {
     const cTenant = (c.tenantName || '').trim().toLowerCase();
+    // Loại bỏ toàn bộ hóa đơn của KHÁCH NÀY khỏi local (Cloud đã là nguồn chân lý)
     if (cTenant === tenantNameKey) return false;
     if (c.roomItems && Array.isArray(c.roomItems)) {
       return !c.roomItems.some((r) => roomNamesKeys.includes((r.roomName || '').trim().toLowerCase()));
@@ -1128,39 +1572,37 @@ export function applyTenantSyncData(syncData: TenantSyncData, isManualRestore: b
     return true;
   });
 
+  // Kiểm tra xem Cloud có gửi về dữ liệu hóa đơn nào không (không phải local cache)
+  // Nếu Cloud rỗng mà local có -> Tôn trọng Cloud: hóa đơn đã bị xóa trên Cloud, không resurrected nữa!
   const updatedCombined = [...nonTenantCombined, ...cleanRecalculatedCombined].sort(
     (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
   );
 
   localStorage.setItem(COMBINED_HISTORY_KEY, JSON.stringify(updatedCombined));
 
-  // 4. Tự động tính toán lại toàn bộ chi phí cho Hóa Đơn Đơn
   const recalculatedSingle = (syncData.singleHistory || []).map((record) => {
     if (!record.input) return record;
     const result = calculateBill(record.input, settings);
-    return {
-      ...record,
-      result,
-    };
+    return { ...record, result };
   });
 
   const cleanRecalculatedSingle = recalculatedSingle.filter(
-    (item) => !deletedBillIds.has(item.id) && !pendingBillIds.has(item.id)
+    (item: BillRecord) => !deletedBillIds.has(item.id) && !pendingBillIds.has(item.id)
   );
 
   const localSingle = getBillHistory().filter(
-    (item) => !deletedBillIds.has(item.id) && !pendingBillIds.has(item.id)
+    (item: BillRecord) => !deletedBillIds.has(item.id) && !pendingBillIds.has(item.id)
   );
 
-  const nonTenantSingle = localSingle.filter((s) => {
+  // Loại bỏ toàn bộ hóa đơn đơn lẻ của KHÁCH NÀY khỏi local (Cloud đã là nguồn chân lý)
+  const nonTenantSingle = localSingle.filter((s: BillRecord) => {
     const sRoom = (s.input?.roomName || '').trim().toLowerCase();
     return !roomNamesKeys.includes(sRoom);
   });
 
   const updatedSingle = [...nonTenantSingle, ...cleanRecalculatedSingle].sort(
-    (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+    (a: BillRecord, b: BillRecord) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
   );
 
   localStorage.setItem(HISTORY_KEY, JSON.stringify(updatedSingle));
 }
-

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import type { BillInput, Settings } from '../types/calculator';
 import { Home, Zap, Droplets, Calculator, FileText, Calendar, AlertCircle, ArrowRight, ArrowLeft, CheckCircle2 } from 'lucide-react';
-import { calculateBill, formatVND, formatNumber, getPreviousReading } from '../utils/calculator';
+import { calculateBill, formatVND, formatNumber, getPreviousReading, formatMonthDisplay } from '../utils/calculator';
 
 interface RentCalculatorFormProps {
   settings: Settings;
@@ -156,24 +156,40 @@ export const RentCalculatorForm: React.FC<RentCalculatorFormProps> = ({
             </div>
 
             <div className="form-group">
-              <label className="form-label" style={{ color: 'var(--accent-cyan)' }}>📅 Kỳ Tính Tiền / Tháng (Lịch)</label>
+              <label className="form-label" style={{ color: 'var(--accent-cyan)', textAlign: 'center', width: '100%', display: 'block' }}>📅 Kỳ Tính Tiền / Tháng (Lịch)</label>
               <div
                 className="input-wrapper"
-                style={{ cursor: 'pointer' }}
-                onClick={(e) => {
-                  const input = e.currentTarget.querySelector('input');
-                  if (input) {
-                    try {
-                      input.showPicker?.();
-                    } catch (err) {}
-                  }
+                style={{
+                  position: 'relative',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  cursor: 'pointer',
+                  background: 'rgba(0, 0, 0, 0.3)',
+                  border: '1px solid var(--border-color)',
+                  borderRadius: 'var(--radius-sm)',
+                  padding: '9px 12px',
+                  width: '100%',
                 }}
               >
-                <Calendar className="input-icon" size={16} />
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', width: '100%', pointerEvents: 'none' }}>
+                  <Calendar size={16} color="var(--accent-cyan)" />
+                  <span style={{ fontSize: '0.98rem', fontWeight: 800, color: 'var(--accent-cyan)' }}>
+                    {formatMonthDisplay(monthYear)}
+                  </span>
+                </div>
                 <input
                   type="month"
-                  className="form-input"
-                  style={{ paddingLeft: '32px', textAlign: 'left', cursor: 'pointer' }}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: '100%',
+                    opacity: 0,
+                    cursor: 'pointer',
+                    zIndex: 10,
+                  }}
                   value={monthYear.startsWith('Tháng') ? new Date().toISOString().slice(0, 7) : monthYear}
                   onChange={(e) => setMonthYear(e.target.value)}
                   onClick={(e) => {
@@ -315,7 +331,7 @@ export const RentCalculatorForm: React.FC<RentCalculatorFormProps> = ({
           <div className="card">
             <div className="card-header">
               <span className="card-title">
-                <Droplets size={16} color="#06b6d4" /> Số NƯỚC (Bậc 1: {formatNumber(settings.waterTier1Rate)}đ)
+                <Droplets size={16} color="#06b6d4" /> Số NƯỚC (Bậc 1: {formatNumber(settings.waterTier1Rate)}đ | Bậc 2: {formatNumber(settings.waterTier2Rate)}đ)
               </span>
             </div>
 
