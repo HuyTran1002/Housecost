@@ -447,12 +447,37 @@ export function removeDeletedBillId(id: string): void {
   } catch (e) {}
 }
 
-// LỊCH SỬ HÓA ĐƠN ĐƠN (Single room)
-export function getBillHistory(): BillRecord[] {
+// LỊCH SỬ HÓA ĐƠN ĐƠN THÔ (Raw Single History không qua bộ lọc ẩn 5 phút)
+export function getRawBillHistory(): BillRecord[] {
   try {
     const saved = localStorage.getItem(HISTORY_KEY);
     if (saved) {
-      const records: BillRecord[] = JSON.parse(saved);
+      return JSON.parse(saved);
+    }
+  } catch (e) {
+    console.error('Lỗi đọc raw single history:', e);
+  }
+  return [];
+}
+
+// LỊCH SỬ HÓA ĐƠN GỘP THÔ (Raw Combined History không qua bộ lọc ẩn 5 phút)
+export function getRawCombinedBillHistory(): CombinedBillRecord[] {
+  try {
+    const saved = localStorage.getItem(COMBINED_HISTORY_KEY);
+    if (saved) {
+      return JSON.parse(saved);
+    }
+  } catch (e) {
+    console.error('Lỗi đọc raw combined history:', e);
+  }
+  return [];
+}
+
+// LỊCH SỬ HÓA ĐƠN ĐƠN (Single room)
+export function getBillHistory(): BillRecord[] {
+  try {
+    const records: BillRecord[] = getRawBillHistory();
+    if (records.length > 0) {
       const pendingDeletions = getPendingDeletions();
       const deletedBillIds = new Set(getDeletedBillIds());
 
@@ -482,7 +507,7 @@ export function getBillHistory(): BillRecord[] {
 }
 
 export function saveBillRecord(input: BillInput, result: CalculationResult, settings: Settings): BillRecord {
-  const history = getBillHistory();
+  const history = getRawBillHistory();
 
   const roomKey = (input.roomName || '').trim().toLowerCase();
   const monthKey = normalizeMonthKey(input.monthYear || '').trim().toLowerCase();
@@ -535,7 +560,7 @@ function triggerAutoCloudPendingSync(): void {
 }
 
 export function deleteBillRecord(id: string): BillRecord[] {
-  const history = getBillHistory();
+  const history = getRawBillHistory();
   const targetRecord = history.find((item) => item.id === id);
   const updatedHistory = history.filter((item) => item.id !== id);
 
@@ -550,7 +575,7 @@ export function deleteBillRecord(id: string): BillRecord[] {
       const targetRoom = (targetRecord.input.roomName || '').trim().toLowerCase();
       const targetMonth = normalizeMonthKey(targetRecord.input.monthYear || '').trim().toLowerCase();
 
-      const combinedList = getCombinedBillHistory();
+      const combinedList = getRawCombinedBillHistory();
       let combinedModified = false;
 
       const updatedCombined = combinedList.filter((cRecord) => {
@@ -592,9 +617,8 @@ export function deleteBillRecord(id: string): BillRecord[] {
 // LỊCH SỬ HÓA ĐƠN CỘNG GỘP (Combined)
 export function getCombinedBillHistory(): CombinedBillRecord[] {
   try {
-    const saved = localStorage.getItem(COMBINED_HISTORY_KEY);
-    if (saved) {
-      const records: CombinedBillRecord[] = JSON.parse(saved);
+    const records: CombinedBillRecord[] = getRawCombinedBillHistory();
+    if (records.length > 0) {
       const pendingDeletions = getPendingDeletions();
       const deletedBillIds = new Set(getDeletedBillIds());
 
@@ -625,7 +649,7 @@ export function saveCombinedBillRecord(
   monthYear: string,
   roomItems: { roomName: string; input: BillInput; result: CalculationResult }[]
 ): CombinedBillRecord {
-  const history = getCombinedBillHistory();
+  const history = getRawCombinedBillHistory();
   const grandTotal = roomItems.reduce((acc, curr) => acc + curr.result.totalAmount, 0);
 
   const tenantKey = tenantName.trim().toLowerCase();
@@ -1208,7 +1232,7 @@ export function undoPendingDeletion(id: string): void {
         if (!restoredTenantObj) {
           const tenantName = targetPending.tenantName || 'Khách thuê';
           const tId = targetPending.id && targetPending.id.startsWith('tenant-') ? targetPending.id : (id.startsWith('tenant-') ? id : `tenant-${Date.now()}`);
-          const combined = getCombinedBillHistory();
+          const combined = getRawCombinedBillHistory();
           const foundC = combined.find((c) => (c.tenantName || '').trim().toLowerCase() === targetNameLower);
           const rooms = foundC && foundC.roomItems ? foundC.roomItems.map((r) => ({ roomName: r.roomName, defaultRent: r.result?.rentAmount || 0 })) : [{ roomName: 'Phòng 101', defaultRent: 0 }];
 
@@ -1243,7 +1267,7 @@ export function undoPendingDeletion(id: string): void {
 }
 
 export function deleteCombinedBillRecord(id: string): CombinedBillRecord[] {
-  const combinedList = getCombinedBillHistory();
+  const combinedList = getRawCombinedBillHistory();
   const targetRecord = combinedList.find((item) => item.id === id);
   const tenantName = targetRecord?.tenantName;
   const docId = tenantName ? getTenantDocId({ name: tenantName, id: '' }) : undefined;
@@ -1269,7 +1293,7 @@ export function deleteCombinedBillRecord(id: string): CombinedBillRecord[] {
     });
 
     // 2. Xóa các hóa đơn phòng đơn tương ứng
-    const singleList = getBillHistory();
+    const singleList = getRawBillHistory();
     const updatedSingle = singleList.filter((rec) => {
       const recRoom = (rec.input?.roomName || '').trim().toLowerCase();
       const recMonth = (rec.input?.monthYear || '').trim().toLowerCase();
@@ -1371,7 +1395,7 @@ export function getTenants(): Tenant[] {
     let recovered = false;
 
     // Phục hồi từ Lịch sử Hóa đơn gộp (Combined History) đối với hồ sơ khách thuê hợp lệ chưa từng bị xóa
-    const combinedHistory = getCombinedBillHistory();
+    const combinedHistory = getRawCombinedBillHistory();
     combinedHistory.forEach((record) => {
       const name = (record.tenantName || '').trim();
       const lowerName = name.toLowerCase();
@@ -1474,8 +1498,8 @@ export function exportAllDataPackage(): AppDataPackage {
   return {
     tenants: getTenants(),
     settings: getSettings(),
-    history: getBillHistory(),
-    combinedHistory: getCombinedBillHistory(),
+    history: getRawBillHistory(),
+    combinedHistory: getRawCombinedBillHistory(),
     draftReadings: getDraftReadings(),
     exportedAt: new Date().toISOString(),
   };
@@ -1540,10 +1564,10 @@ export function getTenantSyncData(tenantId: string): TenantSyncData | null {
   const allDrafts = getDraftReadings();
   const tenantDrafts = allDrafts.filter((d) => roomNames.includes((d.roomName || '').trim().toLowerCase()));
 
-  const allSingle = getBillHistory();
+  const allSingle = getRawBillHistory();
   const tenantSingle = allSingle.filter((s) => roomNames.includes((s.input?.roomName || '').trim().toLowerCase()));
 
-  const allCombined = getCombinedBillHistory();
+  const allCombined = getRawCombinedBillHistory();
   const tenantCombined = allCombined.filter((c) => {
     if (c.tenantName && c.tenantName.trim().toLowerCase() === tenantName) return true;
     if (c.roomItems && Array.isArray(c.roomItems)) {
@@ -1733,7 +1757,7 @@ export function applyTenantSyncData(syncData: TenantSyncData, isManualRestore: b
   );
 
   // Lọc ra các hóa đơn gộp thuộc về các khách khác (không thuộc khách thuê đang đồng bộ)
-  const localCombined = getCombinedBillHistory().filter(
+  const localCombined = getRawCombinedBillHistory().filter(
     (item) => !deletedBillIds.has(item.id) && !pendingBillIds.has(item.id)
   );
 
@@ -1781,7 +1805,7 @@ export function applyTenantSyncData(syncData: TenantSyncData, isManualRestore: b
     (item: BillRecord) => !deletedBillIds.has(item.id) && !pendingBillIds.has(item.id)
   );
 
-  const localSingle = getBillHistory().filter(
+  const localSingle = getRawBillHistory().filter(
     (item: BillRecord) => !deletedBillIds.has(item.id) && !pendingBillIds.has(item.id)
   );
 
