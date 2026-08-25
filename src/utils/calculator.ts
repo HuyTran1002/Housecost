@@ -1107,16 +1107,25 @@ export function undoPendingDeletion(id: string): void {
     }
     addRestoredId(id);
 
-    // 2. Gỡ chỉ mục này khỏi mảng pendingDeletions & deletedBillIds ở local
+    // 2. Gỡ chỉ mục này khỏi mảng pendingDeletions & deletedBillIds ở local và LƯU VẾT KHÔI PHỤC (addRestoredId)
     removePendingDeletion(id);
+    addRestoredId(id);
+
     if (targetPending) {
       if (targetPending.id) {
         removePendingDeletion(targetPending.id);
         removeDeletedBillId(targetPending.id);
+        addRestoredId(targetPending.id);
       }
       if (targetPending.docId) {
         removePendingDeletion(targetPending.docId);
         removeDeletedBillId(targetPending.docId);
+        addRestoredId(targetPending.docId);
+      }
+      if (targetPending.tenantName) {
+        addRestoredId(targetPending.tenantName);
+        const cleanDoc = getTenantDocId({ name: targetPending.tenantName, id: '' });
+        if (cleanDoc) addRestoredId(cleanDoc);
       }
     }
     removeDeletedBillId(id);
@@ -1180,7 +1189,8 @@ export function undoPendingDeletion(id: string): void {
       }
     }
 
-    // 4. NẾU HOÀN TÁC KHÁCH THUÊ: Chỉ phục hồi Hồ sơ khách thuê vào housecost_tenants (Không đụng đến bill)
+    // 4. NẾU HOÀN TÁC KHÁCH THUÊ: Phục hồi Hồ sơ khách thuê và đồng bộ tự động lên Cloud
+    let restoredTenantObj: Tenant | undefined;
     if (targetPending && (targetPending.type === 'tenant' || id.startsWith('tenant-'))) {
       const rawSavedTenants = localStorage.getItem(TENANTS_KEY);
       let currentTenants: Tenant[] = rawSavedTenants ? JSON.parse(rawSavedTenants) : [];
@@ -1193,25 +1203,35 @@ export function undoPendingDeletion(id: string): void {
       });
 
       if (existingIndex < 0) {
-        let restoredTenant: Tenant | undefined = targetPending.tenantData;
+        restoredTenantObj = targetPending.tenantData;
 
-        if (!restoredTenant) {
+        if (!restoredTenantObj) {
           const tenantName = targetPending.tenantName || 'Khách thuê';
           const tId = targetPending.id && targetPending.id.startsWith('tenant-') ? targetPending.id : (id.startsWith('tenant-') ? id : `tenant-${Date.now()}`);
           const combined = getCombinedBillHistory();
           const foundC = combined.find((c) => (c.tenantName || '').trim().toLowerCase() === targetNameLower);
           const rooms = foundC && foundC.roomItems ? foundC.roomItems.map((r) => ({ roomName: r.roomName, defaultRent: r.result?.rentAmount || 0 })) : [{ roomName: 'Phòng 101', defaultRent: 0 }];
 
-          restoredTenant = {
+          restoredTenantObj = {
             id: tId,
             name: tenantName,
             rooms,
           };
         }
 
-        currentTenants.push(restoredTenant);
+        currentTenants.push(restoredTenantObj);
         localStorage.setItem(TENANTS_KEY, JSON.stringify(currentTenants));
         if (typeof window !== 'undefined') window.dispatchEvent(new Event('localDataChanged'));
+      } else {
+        restoredTenantObj = currentTenants[existingIndex];
+      }
+
+      if (restoredTenantObj && typeof window !== 'undefined' && typeof navigator !== 'undefined' && navigator.onLine) {
+        setTimeout(() => {
+          import('../services/cloudSyncService').then((m) => {
+            m.syncTenantToCloud(restoredTenantObj!.id).catch(() => null);
+          });
+        }, 200);
       }
     }
 

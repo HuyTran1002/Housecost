@@ -599,10 +599,37 @@ export async function syncPendingDeletionsToCloud(): Promise<boolean> {
         }
       });
 
+      // Kiểm tra danh sách khách thuê đang lưu ở local
+      const localTenants = getTenants();
+      const localHasTenant = localTenants.some(
+        (t) => t.id === tId || (t.name && t.name.trim().toLowerCase() === tName)
+      );
+      const localHasTenantPending = localPendingList.some(
+        (p) => p.type === 'tenant' && (p.id === tId || (p.tenantName && p.tenantName.trim().toLowerCase() === tName))
+      );
+
+      // NẾU LOCAL ĐÃ KHÔI PHỤC HỒ SƠ (localHasTenant === true) VÀ KHÔNG CÒN VẾT XÓA LOCAL (localHasTenantPending === false):
+      // -> GỠ SẠCH MỐC XÓA TENANT TRÊN CLOUD!
+      if (localHasTenant && !localHasTenantPending) {
+        for (const [pId, pRecord] of Array.from(pMap.entries())) {
+          if (pRecord.type === 'tenant') {
+            pMap.delete(pId);
+          }
+        }
+      }
+
       for (const [pId, pRecord] of Array.from(pMap.entries())) {
         const pIdLower = pId.trim().toLowerCase();
         const pDocLower = (pRecord.docId || '').trim().toLowerCase();
-        if (restoredSet.has(pIdLower) || (pDocLower && restoredSet.has(pDocLower))) {
+        const pNameLower = (pRecord.tenantName || '').trim().toLowerCase();
+        const pCleanDoc = pNameLower ? getTenantDocId({ name: pNameLower, id: '' }).toLowerCase() : '';
+
+        if (
+          restoredSet.has(pIdLower) ||
+          (pDocLower && restoredSet.has(pDocLower)) ||
+          (pNameLower && restoredSet.has(pNameLower)) ||
+          (pCleanDoc && restoredSet.has(pCleanDoc))
+        ) {
           pMap.delete(pId);
         }
       }
