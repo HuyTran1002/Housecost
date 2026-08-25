@@ -850,10 +850,21 @@ export function purgeTenantHistory(tenantName?: string, docId?: string, tenantId
 
     if (!nameLower && !docLower && !idLower) return;
 
-    // Thu thập toàn bộ danh sách tên phòng thuộc khách thuê bị tiêu hủy
+    // TẬP HỢP TRUY VẾT ĐA CHIỀU (MULTI-DIMENSIONAL PURGE SETS)
+    const possibleNames = new Set<string>();
+    const possibleDocIds = new Set<string>();
+    const possibleTenantIds = new Set<string>();
     const targetRoomNames = new Set<string>();
 
-    // 0. Quét phòng từ pendingDeletions
+    if (nameLower) {
+      possibleNames.add(nameLower);
+      const cleanDoc = getTenantDocId({ name: tenantName || '', id: '' }).toLowerCase();
+      if (cleanDoc) possibleDocIds.add(cleanDoc);
+    }
+    if (docLower) possibleDocIds.add(docLower);
+    if (idLower) possibleTenantIds.add(idLower);
+
+    // 0. Truy vết từ pendingDeletions
     const pendingList = getPendingDeletions();
     pendingList.forEach((p) => {
       if (p.type === 'tenant') {
@@ -861,7 +872,15 @@ export function purgeTenantHistory(tenantName?: string, docId?: string, tenantId
         const pDoc = (p.docId || '').trim().toLowerCase();
         const pId = (p.id || '').trim().toLowerCase();
 
-        if ((nameLower && pName === nameLower) || (docLower && pDoc === docLower) || (idLower && pId === idLower)) {
+        const isMatch =
+          (nameLower && pName === nameLower) ||
+          (docLower && (pDoc === docLower || pDoc.includes(docLower) || docLower.includes(pDoc))) ||
+          (idLower && (pId === idLower || pId.includes(idLower) || idLower.includes(pId)));
+
+        if (isMatch) {
+          if (pName) possibleNames.add(pName);
+          if (pDoc) possibleDocIds.add(pDoc);
+          if (pId) possibleTenantIds.add(pId);
           if (p.tenantData && Array.isArray(p.tenantData.rooms)) {
             p.tenantData.rooms.forEach((r) => {
               if (r.roomName) targetRoomNames.add(r.roomName.trim().toLowerCase());
@@ -871,50 +890,97 @@ export function purgeTenantHistory(tenantName?: string, docId?: string, tenantId
       }
     });
 
-    // 1. Dọn dẹp trực tiếp dữ liệu thô Combined History từ localStorage & thu thập danh sách phòng
-    const rawCombined = localStorage.getItem(COMBINED_HISTORY_KEY);
-    if (rawCombined) {
-      const combinedHistory: CombinedBillRecord[] = JSON.parse(rawCombined);
-      combinedHistory.forEach((c) => {
-        const cTenant = (c.tenantName || '').trim().toLowerCase();
-        const cDoc = getTenantDocId({ name: c.tenantName || '', id: '' }).toLowerCase();
+    // 0.1. Truy vết từ TENANTS_KEY (nếu còn)
+    const rawTenantsForTrace = localStorage.getItem(TENANTS_KEY);
+    if (rawTenantsForTrace) {
+      try {
+        const tenantsList: Tenant[] = JSON.parse(rawTenantsForTrace);
+        tenantsList.forEach((t) => {
+          const tName = (t.name || '').trim().toLowerCase();
+          const tDoc = getTenantDocId(t).toLowerCase();
+          const tId = (t.id || '').trim().toLowerCase();
 
-        if ((nameLower && cTenant === nameLower) || (docLower && (cDoc === docLower || cDoc.includes(docLower) || docLower.includes(cDoc)))) {
-          if (Array.isArray(c.roomItems)) {
-            c.roomItems.forEach((r) => {
-              if (r.roomName) targetRoomNames.add(r.roomName.trim().toLowerCase());
-            });
+          const isMatch =
+            (nameLower && tName === nameLower) ||
+            (docLower && (tDoc === docLower || tDoc.includes(docLower) || docLower.includes(tDoc))) ||
+            (idLower && (tId === idLower || tId.includes(idLower) || idLower.includes(tId)));
+
+          if (isMatch) {
+            if (tName) possibleNames.add(tName);
+            if (tDoc) possibleDocIds.add(tDoc);
+            if (tId) possibleTenantIds.add(tId);
+            if (Array.isArray(t.rooms)) {
+              t.rooms.forEach((r) => {
+                if (r.roomName) targetRoomNames.add(r.roomName.trim().toLowerCase());
+              });
+            }
           }
-        }
-      });
+        });
+      } catch (e) {}
+    }
 
+    // 0.2. Truy vết từ COMBINED_HISTORY_KEY
+    const rawCombinedForTrace = localStorage.getItem(COMBINED_HISTORY_KEY);
+    if (rawCombinedForTrace) {
+      try {
+        const combinedHistory: CombinedBillRecord[] = JSON.parse(rawCombinedForTrace);
+        combinedHistory.forEach((c) => {
+          const cTenant = (c.tenantName || '').trim().toLowerCase();
+          const cDoc = getTenantDocId({ name: c.tenantName || '', id: '' }).toLowerCase();
+
+          const isMatch =
+            (nameLower && cTenant === nameLower) ||
+            Array.from(possibleNames).some((pName) => pName === cTenant) ||
+            Array.from(possibleDocIds).some((pDoc) => pDoc === cDoc || pDoc.includes(cDoc) || cDoc.includes(pDoc));
+
+          if (isMatch) {
+            if (cTenant) possibleNames.add(cTenant);
+            if (cDoc) possibleDocIds.add(cDoc);
+            if (Array.isArray(c.roomItems)) {
+              c.roomItems.forEach((r) => {
+                if (r.roomName) targetRoomNames.add(r.roomName.trim().toLowerCase());
+              });
+            }
+          }
+        });
+      } catch (e) {}
+    }
+
+    // NẾU KHÔNG CÓ TRUY VẾT NÀO ĐƯỢC TÌM THẤY THÌ DÙNG nameLower / docLower BAN ĐẦU
+    if (possibleNames.size === 0 && nameLower) possibleNames.add(nameLower);
+    if (possibleDocIds.size === 0 && docLower) possibleDocIds.add(docLower);
+
+    // 1. TIÊU HỦY VĨNH VIỄN COMBINED HISTORY từ localStorage
+    if (rawCombinedForTrace) {
+      const combinedHistory: CombinedBillRecord[] = JSON.parse(rawCombinedForTrace);
       const updatedCombined = combinedHistory.filter((c) => {
         const cTenant = (c.tenantName || '').trim().toLowerCase();
         const cDoc = getTenantDocId({ name: c.tenantName || '', id: '' }).toLowerCase();
 
-        if (nameLower && cTenant === nameLower) return false;
-        if (docLower && (cDoc === docLower || cDoc.includes(docLower) || docLower.includes(cDoc))) return false;
+        if (cTenant && possibleNames.has(cTenant)) return false;
+        if (cDoc && Array.from(possibleDocIds).some((pDoc) => pDoc === cDoc || pDoc.includes(cDoc) || cDoc.includes(pDoc))) return false;
         return true;
       });
       localStorage.setItem(COMBINED_HISTORY_KEY, JSON.stringify(updatedCombined));
     }
 
-    // 2. Dọn dẹp trực tiếp dữ liệu thô Single History từ localStorage theo Tên Khách, ID và Tên Phòng
+    // 2. TIÊU HỦY VĨNH VIỄN SINGLE HISTORY từ localStorage
     const rawSingle = localStorage.getItem(HISTORY_KEY);
     if (rawSingle) {
       const singleHistory: BillRecord[] = JSON.parse(rawSingle);
       const updatedSingle = singleHistory.filter((s) => {
         if (!s) return false;
         const sRoom = (s.input?.roomName || '').trim().toLowerCase();
+        const sId = (s.id || '').trim().toLowerCase();
 
-        if (idLower && s.id && s.id.toLowerCase().includes(idLower)) return false;
+        if (sId && Array.from(possibleTenantIds).some((pId) => sId.includes(pId))) return false;
         if (sRoom && targetRoomNames.has(sRoom)) return false;
         return true;
       });
       localStorage.setItem(HISTORY_KEY, JSON.stringify(updatedSingle));
     }
 
-    // 3. Dọn dẹp trực tiếp dữ liệu thô Số Tạm (Draft Readings) theo Tên Phòng
+    // 3. TIÊU HỦY VĨNH VIỄN SỐ TẠM (DRAFT READINGS) từ localStorage
     const rawDrafts = localStorage.getItem(DRAFT_READINGS_KEY);
     if (rawDrafts && targetRoomNames.size > 0) {
       const drafts: DraftReading[] = JSON.parse(rawDrafts);
@@ -927,16 +993,18 @@ export function purgeTenantHistory(tenantName?: string, docId?: string, tenantId
       localStorage.setItem(DRAFT_READINGS_KEY, JSON.stringify(updatedDrafts));
     }
 
-    // 4. Đảm bảo TENANTS_KEY cũng được dọn sạch hoàn toàn khỏi dữ liệu thô
+    // 4. TIÊU HỦY VĨNH VIỄN TENANTS_KEY từ localStorage
     const rawTenants = localStorage.getItem(TENANTS_KEY);
     if (rawTenants) {
       const tenantsList: Tenant[] = JSON.parse(rawTenants);
       const updatedTenants = tenantsList.filter((t) => {
         const tName = (t.name || '').trim().toLowerCase();
         const tDoc = getTenantDocId(t).toLowerCase();
-        if (idLower && t.id.toLowerCase() === idLower) return false;
-        if (nameLower && tName === nameLower) return false;
-        if (docLower && (tDoc === docLower || tDoc.includes(docLower) || docLower.includes(tDoc))) return false;
+        const tId = (t.id || '').trim().toLowerCase();
+
+        if (tId && possibleTenantIds.has(tId)) return false;
+        if (tName && possibleNames.has(tName)) return false;
+        if (tDoc && Array.from(possibleDocIds).some((pDoc) => pDoc === tDoc || pDoc.includes(tDoc) || tDoc.includes(pDoc))) return false;
         return true;
       });
       localStorage.setItem(TENANTS_KEY, JSON.stringify(updatedTenants));
