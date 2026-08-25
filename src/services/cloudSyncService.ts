@@ -433,48 +433,73 @@ export async function reconcileCloudWithLocal(): Promise<{ cleanedTenantsCount: 
         return true;
       });
 
+      const pendingTenantNames = new Set(
+        activePendingDeletions
+          .filter((p: any) => p.type === 'tenant')
+          .map((p: any) => (p.tenantName || '').trim().toLowerCase())
+          .filter(Boolean)
+      );
+      const pendingRooms = new Set<string>();
+      activePendingDeletions.forEach((p: any) => {
+        if (p.type === 'tenant' && p.tenantData && Array.isArray(p.tenantData.rooms)) {
+          p.tenantData.rooms.forEach((r: any) => {
+            if (r.roomName) pendingRooms.add(r.roomName.trim().toLowerCase());
+          });
+        }
+      });
+
       // Dọn dẹp combinedHistory đối với các hóa đơn đang bị xóa chờ
       combinedHistory = combinedHistory.filter((item: any) => {
-        if (!item.id) return true;
-        const pending = activePendingDeletions.find((p) => p.id === item.id);
-        if (!pending) return true;
+        if (!item) return false;
+        if (item.id) {
+          const pending = activePendingDeletions.find((p) => p.id === item.id);
+          if (pending) {
+            const dTime = parseDeletedAt(pending.deletedAt);
+            const cTime = item.createdAt ? new Date(item.createdAt).getTime() : 0;
 
-        const dTime = parseDeletedAt(pending.deletedAt);
-        const cTime = item.createdAt ? new Date(item.createdAt).getTime() : 0;
-
-        // Nếu hóa đơn mới được tính lại SAU thời điểm tạo vết xóa cũ -> Hóa đơn mới hợp lệ, HỦY MỐC XÓA CŨ!
-        if (cTime > 0 && dTime > 0 && cTime > dTime) {
-          removePendingDeletion(pending.id);
-          removeDeletedBillId(pending.id);
-          const pIdx = activePendingDeletions.findIndex((p) => p.id === item.id);
-          if (pIdx >= 0) activePendingDeletions.splice(pIdx, 1);
-          return true; // GIỮ LẠI HÓA ĐƠN MỚI TÍNH!
+            // Nếu hóa đơn mới được tính lại SAU thời điểm tạo vết xóa cũ -> Hóa đơn mới hợp lệ, HỦY MỐC XÓA CŨ!
+            if (cTime > 0 && dTime > 0 && cTime > dTime) {
+              removePendingDeletion(pending.id);
+              removeDeletedBillId(pending.id);
+              const pIdx = activePendingDeletions.findIndex((p) => p.id === item.id);
+              if (pIdx >= 0) activePendingDeletions.splice(pIdx, 1);
+              return true; // GIỮ LẠI HÓA ĐƠN MỚI TÍNH!
+            }
+            return false;
+          }
         }
 
-        // Hóa đơn đang nằm ở hàng chờ xóa -> Loại khỏi active combinedHistory trên Cloud!
-        return false;
+        const tName = (item.tenantName || '').trim().toLowerCase();
+        if (tName && pendingTenantNames.has(tName)) return false;
+
+        return true;
       });
 
       // Dọn dẹp singleHistory đối với các hóa đơn đang bị xóa chờ
       singleHistory = singleHistory.filter((item: any) => {
-        if (!item.id) return true;
-        const pending = activePendingDeletions.find((p) => p.id === item.id);
-        if (!pending) return true;
+        if (!item) return false;
+        if (item.id) {
+          const pending = activePendingDeletions.find((p) => p.id === item.id);
+          if (pending) {
+            const dTime = parseDeletedAt(pending.deletedAt);
+            const cTime = item.createdAt ? new Date(item.createdAt).getTime() : 0;
 
-        const dTime = parseDeletedAt(pending.deletedAt);
-        const cTime = item.createdAt ? new Date(item.createdAt).getTime() : 0;
-
-        // Nếu hóa đơn mới được tính lại SAU thời điểm tạo vết xóa cũ -> Hóa đơn mới hợp lệ, HỦY MỐC XÓA CŨ!
-        if (cTime > 0 && dTime > 0 && cTime > dTime) {
-          removePendingDeletion(pending.id);
-          removeDeletedBillId(pending.id);
-          const pIdx = activePendingDeletions.findIndex((p) => p.id === item.id);
-          if (pIdx >= 0) activePendingDeletions.splice(pIdx, 1);
-          return true; // GIỮ LẠI HÓA ĐƠN MỚI TÍNH!
+            // Nếu hóa đơn mới được tính lại SAU thời điểm tạo vết xóa cũ -> Hóa đơn mới hợp lệ, HỦY MỐC XÓA CŨ!
+            if (cTime > 0 && dTime > 0 && cTime > dTime) {
+              removePendingDeletion(pending.id);
+              removeDeletedBillId(pending.id);
+              const pIdx = activePendingDeletions.findIndex((p) => p.id === item.id);
+              if (pIdx >= 0) activePendingDeletions.splice(pIdx, 1);
+              return true; // GIỮ LẠI HÓA ĐƠN MỚI TÍNH!
+            }
+            return false;
+          }
         }
 
-        // Hóa đơn đang nằm ở hàng chờ xóa -> Loại khỏi active singleHistory trên Cloud!
-        return false;
+        const rName = (item.input?.roomName || '').trim().toLowerCase();
+        if (rName && pendingRooms.has(rName)) return false;
+
+        return true;
       });
 
       // Bổ sung vết xóa khách thuê (nếu khách này đang trong hạn chờ xóa)

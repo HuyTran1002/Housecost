@@ -1727,9 +1727,25 @@ export function applyTenantSyncData(syncData: TenantSyncData, isManualRestore: b
     return true;
   });
 
-  // Kiểm tra xem Cloud có gửi về dữ liệu hóa đơn nào không (không phải local cache)
-  // Nếu Cloud rỗng mà local có -> Tôn trọng Cloud: hóa đơn đã bị xóa trên Cloud, không resurrected nữa!
-  const updatedCombined = [...nonTenantCombined, ...cleanRecalculatedCombined].sort(
+  // Khử trùng ID tuyệt đối bằng Map cho Combined History (Chống nhân bản trùng lập hóa đơn)
+  const combinedMap = new Map<string, CombinedBillRecord>();
+
+  cleanRecalculatedCombined.forEach((item) => {
+    if (item && item.id) {
+      combinedMap.set(item.id.trim().toLowerCase(), item);
+    }
+  });
+
+  nonTenantCombined.forEach((item) => {
+    if (item && item.id) {
+      const key = item.id.trim().toLowerCase();
+      if (!combinedMap.has(key)) {
+        combinedMap.set(key, item);
+      }
+    }
+  });
+
+  const updatedCombined = Array.from(combinedMap.values()).sort(
     (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
   );
 
@@ -1755,7 +1771,25 @@ export function applyTenantSyncData(syncData: TenantSyncData, isManualRestore: b
     return !roomNamesKeys.includes(sRoom);
   });
 
-  const updatedSingle = [...nonTenantSingle, ...cleanRecalculatedSingle].sort(
+  // Khử trùng ID tuyệt đối bằng Map cho Single History
+  const singleMap = new Map<string, BillRecord>();
+
+  cleanRecalculatedSingle.forEach((item) => {
+    if (item && item.id) {
+      singleMap.set(item.id.trim().toLowerCase(), item);
+    }
+  });
+
+  nonTenantSingle.forEach((item) => {
+    if (item && item.id) {
+      const key = item.id.trim().toLowerCase();
+      if (!singleMap.has(key)) {
+        singleMap.set(key, item);
+      }
+    }
+  });
+
+  const updatedSingle = Array.from(singleMap.values()).sort(
     (a: BillRecord, b: BillRecord) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
   );
 
